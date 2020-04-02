@@ -16,16 +16,16 @@ import (
 
 type XmlEvent struct {
 	Name string `xml:"id,attr"`
-	Cond string `xml:"if,attr"`
-	Dst  string `xml:"dst,attr"`
-	Act  string `xml:"act,attr"`
+	Cond string `xml:"if,attr,omitempty"`
+	Dst  string `xml:"dst,attr,omitempty"`
+	Act  string `xml:"act,attr,omitempty"`
 }
 
 type XmlState struct {
 	Name   string     `xml:"id,attr"`
-	Entry  string     `xml:"entry,attr"`
-	Exit   string     `xml:"exit,attr"`
-	Start  string     `xml:"start,attr"`
+	Entry  string     `xml:"entry,attr,omitempty"`
+	Exit   string     `xml:"exit,attr,omitempty"`
+	Start  string     `xml:"start,attr,omitempty"`
 	States []XmlState `xml:"state"`
 	Events []XmlEvent `xml:"event"`
 }
