@@ -22,7 +22,7 @@ type XmlEvent struct {
 }
 
 type XmlState struct {
-	Name   string     `xml:"id,attr"`
+	Name   string     `xml:"id,attr,omitempty"`
 	Entry  string     `xml:"entry,attr,omitempty"`
 	Exit   string     `xml:"exit,attr,omitempty"`
 	Start  string     `xml:"start,attr,omitempty"`
@@ -309,6 +309,26 @@ func Validate(root IState) {
 		states[state.Name()] = true
 	})
 	ForEachState(root, func(state IState) {
+		if state.IsLeaf() {
+			if state.Name() == "" {
+				panic("found leaf state with no id")
+			}
+		}
+	})
+	ForEachState(root, func(state IState) {
+		if state.IsNested() {
+			if state.Start() != nil {
+				var found = false
+				ForEachChild(state, true, func(child IState) {
+					found = found || child == state.Start()
+				})
+				if found == false {
+					panic("invalid start for state id " + state.Name())
+				}
+			}
+		}
+	})
+	ForEachState(root, func(state IState) {
 		for idx1, event1 := range state.Events() {
 			for idx2, event2 := range state.Events() {
 				if idx1 == idx2 {
@@ -533,6 +553,7 @@ func main() {
 	defer func() {
 		if msg := recover(); msg != nil {
 			fmt.Println(msg)
+			os.Exit(1)
 		}
 	}()
 	if len(os.Args) != 4 {
