@@ -14,178 +14,154 @@ import (
 
 /******************************************************************************/
 
-type XmlEvent struct {
+type XEvent struct {
 	Name string `xml:"id,attr"`
 	Cond string `xml:"if,attr,omitempty"`
 	Dst  string `xml:"dst,attr,omitempty"`
 	Act  string `xml:"act,attr,omitempty"`
 }
 
-type XmlState struct {
-	Name   string     `xml:"id,attr,omitempty"`
-	Entry  string     `xml:"entry,attr,omitempty"`
-	Exit   string     `xml:"exit,attr,omitempty"`
-	Start  string     `xml:"start,attr,omitempty"`
-	States []XmlState `xml:"state"`
-	Events []XmlEvent `xml:"event"`
+type XState struct {
+	Name   string   `xml:"id,attr,omitempty"`
+	Entry  string   `xml:"entry,attr,omitempty"`
+	Exit   string   `xml:"exit,attr,omitempty"`
+	Start  string   `xml:"start,attr,omitempty"`
+	States []XState `xml:"state"`
+	Events []XEvent `xml:"event"`
 }
 
-type XmlRoot struct {
-	XMLName   xml.Name   `xml:"fsm"`
-	Namespace string     `xml:"ns,attr"`
-	Name      string     `xml:"name,attr"`
-	Start     string     `xml:"start,attr"`
-	States    []XmlState `xml:"state"`
-	Events    []XmlEvent `xml:"event"`
+type XRoot struct {
+	XMLName   xml.Name `xml:"fsm"`
+	Namespace string   `xml:"ns,attr"`
+	Name      string   `xml:"name,attr"`
+	Start     string   `xml:"start,attr"`
+	States    []XState `xml:"state"`
+	Events    []XEvent `xml:"event"`
 }
 
-func (this XmlRoot) GetXmlState() XmlState {
-	return XmlState{
-		States: this.States,
-		Events: this.Events,
-		Name:   this.Name,
-		Start:  this.Start,
+func (xroot XRoot) GetState() XState {
+	return XState{
+		States: xroot.States,
+		Events: xroot.Events,
+		Start:  xroot.Start,
 	}
 }
 
 /******************************************************************************/
 
-func SplitAttr(text string) []string {
-	var list = make([]string, 0)
-	for _, txt := range strings.Split(text, ",") {
-		if TrimName(txt) != "" {
-			list = append(list, TrimName(txt))
-		}
-	}
-	return list
-}
+type XReader map[string][]func(*State)
 
-func TrimName(text string) string {
-	return strings.TrimSpace(text)
-}
-
-func StateFromXml(xmlroot XmlState, parent IState, resolve map[string][]func(IState)) IState {
-	var state = &State{
-		name:   TrimName(xmlroot.Name),
+func (this XReader) CreateState(xroot XState, parent *State) *State {
+	var root = &State{
+		name:   Trim(xroot.Name),
 		parent: parent,
-		entry:  SplitAttr(xmlroot.Entry),
-		exit:   SplitAttr(xmlroot.Exit),
+		entry:  SplitAttr(xroot.Entry),
+		exit:   SplitAttr(xroot.Exit),
 	}
-	for _, xmlst := range xmlroot.States {
-		state.nested = append(state.nested, StateFromXml(xmlst, state, resolve))
+	this.Add(Trim(xroot.Start), func(state *State) {
+		root.start = state
+	})
+	for _, xchild := range xroot.States {
+		root.AddState(this.CreateState(xchild, root))
 	}
-	for _, xmlev := range xmlroot.Events {
+	for _, xevent := range xroot.Events {
 		var event = &Event{
-			name: TrimName(xmlev.Name),
-			cond: TrimName(xmlev.Cond),
-			src:  state,
-			act:  SplitAttr(xmlev.Act),
+			name: Trim(xevent.Name),
+			cond: Trim(xevent.Cond),
+			src:  root,
+			act:  SplitAttr(xevent.Act),
 		}
-		var dst = TrimName(xmlev.Dst)
-		resolve[dst] = append(resolve[dst], func(st IState) {
-			event.dst = st
+		if root.AddEvent(event) {
+			panic("event " + event.name + " redeclared in state " + root.name)
+		}
+		this.Add(Trim(xevent.Dst), func(state *State) {
+			event.dst = state
 		})
-		state.events = append(state.events, event)
-	}
-	var start = TrimName(xmlroot.Start)
-	resolve[start] = append(resolve[start], func(st IState) {
-		state.start = st
-	})
-	return state
-}
-
-func FromXml(xmlroot XmlState) IState {
-	var resolve = make(map[string][]func(IState))
-	var root = StateFromXml(xmlroot, nil, resolve)
-	ForEachState(root, func(st IState) {
-		if st.Name() == "" {
-			return
-		}
-		if list, ok := resolve[st.Name()]; ok {
-			for _, fn := range list {
-				fn(st)
-			}
-			resolve[st.Name()] = nil
-		}
-	})
-	for key, val := range resolve {
-		if key != "" && val != nil {
-			panic("unknown state " + key)
-		}
 	}
 	return root
 }
 
-func ReadXml(file io.Reader) (root XmlRoot) {
-	data, err := ioutil.ReadAll(file)
-	if err != nil {
-		panic(err)
+func (this XReader) Add(name string, setfn func(*State)) {
+	if name == "" {
+		return
 	}
-	err = xml.Unmarshal(data, &root)
-	if err != nil {
-		panic(err)
-	}
-	return
+	this[name] = append(this[name], setfn)
 }
 
-func ToXml(xmlroot XmlRoot, prefix string) []byte {
-	data, err := xml.MarshalIndent(xmlroot, prefix, "  ")
-	if err != nil {
-		panic(err)
+func (this XReader) Invoke(root *State) {
+	for _, state := range root.AllNested(root) {
+		if state.name == "" {
+			continue
+		}
+		if list, ok := this[state.name]; ok {
+			for _, setfn := range list {
+				setfn(state)
+			}
+		}
+		this[state.name] = nil
 	}
-	return data
+	for name, list := range this {
+		if len(list) != 0 {
+			panic("unknown state " + name)
+		}
+	}
 }
 
 /******************************************************************************/
 
-type IState interface {
-	Name() string
-	Start() IState
-	Parent() IState
-	Entry() []string
-	Exit() []string
-	Children() []IState
-	Events() []IEvent
-	IsNested() bool
-	IsLeaf() bool
-	AddEvent(IEvent)
-}
-
-type IEvent interface {
-	Name() string
-	Cond() string
-	Src() IState
-	Dst() IState
-	Actions() []string
-	IsInternal() bool
-}
-
-type IAction interface {
-	IsFunc() bool
-	IsState() bool
-	Func() string
-	State() IState
+func ReadXml(file io.Reader) (*State, string, string, string) {
+	var reader = make(XReader)
+	var xroot XRoot
+	var data, err = ioutil.ReadAll(file)
+	if err != nil {
+		panic(err)
+	}
+	err = xml.Unmarshal(data, &xroot)
+	if err != nil {
+		panic(err)
+	}
+	var root = reader.CreateState(xroot.GetState(), nil)
+	reader.Invoke(root)
+	var text, _ = xml.MarshalIndent(xroot, "", "\t")
+	return root, xroot.Name, xroot.Namespace, string(text)
 }
 
 /******************************************************************************/
 
 type State struct {
 	name   string
-	start  IState
-	parent IState
+	start  *State
+	parent *State
 	entry  []string
 	exit   []string
-	nested []IState
-	events []IEvent
+	nested []*State
+	events []*Event
+}
+
+type Event struct {
+	name string
+	cond string
+	src  *State
+	dst  *State
+	act  []string
 }
 
 func (state *State) Name() string {
 	return state.name
 }
-func (state *State) Start() IState {
+func (state *State) Start() *State {
 	return state.start
 }
-func (state *State) Parent() IState {
+func (state *State) FollowStart() *State {
+	if state.IsLeaf() {
+		return state
+	}
+	if state.start == nil {
+		panic("missing start in state " + state.Name())
+	}
+	return state.start.FollowStart()
+}
+func (state *State) Parent() *State {
 	return state.parent
 }
 func (state *State) Entry() []string {
@@ -194,11 +170,15 @@ func (state *State) Entry() []string {
 func (state *State) Exit() []string {
 	return state.exit
 }
-func (state *State) Children() []IState {
+func (state *State) Nested() []*State {
 	return state.nested
 }
-func (state *State) Events() []IEvent {
-	return state.events
+func (state *State) AllNested(states ...*State) []*State {
+	for _, st := range state.nested {
+		states = append(states, st)
+		states = st.AllNested(states...)
+	}
+	return states
 }
 func (state *State) IsNested() bool {
 	return len(state.nested) != 0
@@ -206,25 +186,64 @@ func (state *State) IsNested() bool {
 func (state *State) IsLeaf() bool {
 	return len(state.nested) == 0
 }
-func (state *State) AddEvent(event IEvent) {
+func (state *State) Path() []*State {
+	if state.parent == nil {
+		return []*State{state}
+	}
+	return append(state.parent.Path(), state)
+}
+func (state *State) Diff(other *State) ([]*State, []*State) {
+	var src, dst = state.Path(), other.Path()
+	for len(src) != 0 && len(dst) != 0 && src[0] == dst[0] {
+		src = src[1:]
+		dst = dst[1:]
+	}
+	return src, dst
+}
+func (state *State) AddState(other *State) {
+	state.nested = append(state.nested, other)
+}
+func (state *State) Events() []*Event {
+	return state.events
+}
+func (state *State) EventsGrouped() map[string][]*Event {
+	var groups = make(map[string][]*Event)
+	for _, event := range state.events {
+		if event.HasCond() {
+			groups[event.Name()] = append(groups[event.Name()], event)
+		}
+	}
+	for _, event := range state.events {
+		if event.HasCond() == false {
+			groups[event.Name()] = append(groups[event.Name()], event)
+		}
+	}
+	return groups
+}
+func (state *State) AddEvent(event *Event) bool {
 	for _, ev := range state.events {
-		if ev.Name() == event.Name() {
-			if ev.Cond() == event.Cond() {
-				return
-			}
+		if event.Same(ev) {
+			return true
 		}
 	}
 	state.events = append(state.events, event)
+	return false
 }
-
-/******************************************************************************/
-
-type Event struct {
-	name string
-	cond string
-	src  IState
-	dst  IState
-	act  []string
+func (state *State) PushEvents() {
+	for _, child := range state.Nested() {
+		child.PushEvents()
+	}
+	for _, child := range state.AllNested() {
+		for _, event := range state.Events() {
+			child.AddEvent(&Event{
+				event.name,
+				event.cond,
+				child,
+				event.dst,
+				event.act,
+			})
+		}
+	}
 }
 
 func (event *Event) Name() string {
@@ -233,10 +252,10 @@ func (event *Event) Name() string {
 func (event *Event) Cond() string {
 	return event.cond
 }
-func (event *Event) Src() IState {
+func (event *Event) Src() *State {
 	return event.src
 }
-func (event *Event) Dst() IState {
+func (event *Event) Dst() *State {
 	return event.dst
 }
 func (event *Event) Actions() []string {
@@ -245,278 +264,88 @@ func (event *Event) Actions() []string {
 func (event *Event) IsInternal() bool {
 	return event.dst == nil
 }
-
-/******************************************************************************/
-
-type Action struct {
-	fn string
-	st IState
+func (event *Event) HasCond() bool {
+	return event.cond != ""
 }
-
-func (act *Action) IsFunc() bool {
-	return act.fn != ""
-}
-func (act *Action) IsState() bool {
-	return act.st != nil
-}
-func (act *Action) Func() string {
-	return act.fn
-}
-func (act *Action) State() IState {
-	return act.st
-}
-func NewActionFunc(fn string) IAction {
-	return &Action{
-		fn: fn,
-	}
-}
-func NewActionState(state IState) IAction {
-	return &Action{
-		st: state,
-	}
+func (event *Event) Same(other *Event) bool {
+	return event.Name() == other.Name() && event.Cond() == other.Cond()
 }
 
 /******************************************************************************/
 
-func ResolveEvents(root IState) {
-	ForEachChild(root, false, func(state IState) {
-		ResolveEvents(state)
-	})
-	if root.IsNested() {
-		ForEachEvent(root, func(event IEvent) {
-			ForEachChild(root, true, func(state IState) {
-				state.AddEvent(&Event{
-					event.Name(),
-					event.Cond(),
-					state,
-					event.Dst(),
-					event.Actions(),
-				})
-			})
-		})
-	}
-}
-
-func Validate(root IState) {
-	var states = make(map[string]bool)
-	ForEachState(root, func(state IState) {
-		if state.Name() == "" {
-			return
-		}
-		if _, found := states[state.Name()]; found {
-			panic("duplicate state id " + state.Name())
-		}
-		states[state.Name()] = true
-	})
-	ForEachState(root, func(state IState) {
-		if state.IsLeaf() {
-			if state.Name() == "" {
-				panic("found leaf state with no id")
-			}
-		}
-	})
-	ForEachState(root, func(state IState) {
-		if state.IsNested() {
-			if state.Start() != nil {
-				var found = false
-				ForEachChild(state, true, func(child IState) {
-					found = found || child == state.Start()
-				})
-				if found == false {
-					panic("invalid start for state id " + state.Name())
-				}
-			}
-		}
-	})
-	ForEachState(root, func(state IState) {
-		for idx1, event1 := range state.Events() {
-			for idx2, event2 := range state.Events() {
-				if idx1 == idx2 {
-					continue
-				}
-				if event1.Name() != event2.Name() {
-					continue
-				}
-				if event1.Cond() != event2.Cond() {
-					continue
-				}
-				panic("duplicate event " + event1.Name() + " in state " + state.Name())
-			}
-		}
-	})
-}
-
-/******************************************************************************/
-
-func MakeEntry(path ...IState) (actions []IAction) {
+func MakeEntry(path []*State) ([]string, *State) {
 	if len(path) == 0 {
-		return
-	}
-	for _, act := range path[0].Entry() {
-		actions = append(actions, NewActionFunc(act))
+		return nil, nil
 	}
 	if path[0].IsLeaf() {
-		actions = append(actions, NewActionState(path[0]))
-		return
+		return path[0].Entry(), path[0]
 	}
-	if path[0].IsNested() {
-		actions = append(actions, MakeEntry(path[1:]...)...)
-		return
-	}
-	panic("wtf")
+	var act, dst = MakeEntry(path[1:])
+	return append(path[0].Entry(), act...), dst
 }
 
-func MakeExit(path ...IState) (actions []IAction) {
+func MakeExit(path []*State) []string {
 	if len(path) == 0 {
-		return
-	}
-	for _, act := range path[0].Exit() {
-		actions = append(actions, NewActionFunc(act))
-	}
-	actions = append(MakeExit(path[1:]...), actions...)
-	return
-}
-
-func MakeInternal(event IEvent) (actions []IAction) {
-	for _, act := range event.Actions() {
-		actions = append(actions, NewActionFunc(act))
-	}
-	return
-}
-
-func MakeTransition(event IEvent) (actions []IAction) {
-	if event.IsInternal() {
-		return MakeInternal(event)
-	}
-	var src, dst = event.Src(), event.Dst()
-	for dst.IsNested() {
-		if dst.Start() == nil {
-			panic("undefined start, unable to transition to " + dst.Name())
-		}
-		dst = dst.Start()
-	}
-	var expath, enpath = Diff(Path(src), Path(dst))
-	actions = append(actions, MakeExit(expath...)...)
-	actions = append(actions, MakeInternal(event)...)
-	actions = append(actions, MakeEntry(enpath...)...)
-	return
-}
-
-func MakeInit(root IState) []IAction {
-	for root.IsNested() {
-		if root.Start() == nil {
-			panic("undefined start, unable to transition to " + root.Name())
-		}
-		root = root.Start()
-	}
-	return MakeEntry(Path(root)...)
-}
-
-func Path(root IState) []IState {
-	if root == nil {
 		return nil
 	}
-	return append(Path(root.Parent()), root)
+	return append(MakeExit(path[1:]), path[0].Exit()...)
 }
 
-func Diff(src, dst []IState) ([]IState, []IState) {
-	if len(src) == 0 || len(dst) == 0 || src[0] != dst[0] {
-		return src, dst
+func MakeTransition(event *Event) ([]string, *State) {
+	if event.IsInternal() {
+		return event.Actions(), nil
 	}
-	return Diff(src[1:], dst[1:])
+	var srcpath, dstpath = event.Src().Diff(event.Dst().FollowStart())
+	var exit = MakeExit(srcpath)
+	var actions = event.Actions()
+	var entry, dst = MakeEntry(dstpath)
+	return append(exit, append(actions, entry...)...), dst
+}
+
+func MakeStart(root *State) ([]string, *State) {
+	return MakeEntry(root.FollowStart().Path())
 }
 
 /******************************************************************************/
 
-func ForEachChild(root IState, recursive bool, fn func(IState)) {
-	for _, state := range root.Children() {
-		fn(state)
-		if recursive {
-			ForEachChild(state, recursive, fn)
+func AllEvents(root *State) []string {
+	var all []string
+	for _, state := range root.AllNested(root) {
+		for _, event := range state.Events() {
+			all = append(all, event.Name())
 		}
 	}
+	return StringSet(all)
 }
 
-func ForEachState(root IState, fn func(IState)) {
-	fn(root)
-	ForEachChild(root, true, fn)
-}
-
-func ForEachEvent(root IState, fn func(IEvent)) {
-	for _, event := range root.Events() {
-		fn(event)
-	}
-}
-
-func ForEachEventGrouped(root IState, fn func(string, []IEvent)) {
-	var evlist []string
-	var evdict = make(map[string][]IEvent)
-	ForEachEvent(root, func(event IEvent) {
-		evlist = append(evlist, event.Name())
-	})
-	evlist = StringSet(evlist)
-	ForEachEvent(root, func(event IEvent) {
-		if event.Cond() != "" {
-			evdict[event.Name()] = append(evdict[event.Name()], event)
-		}
-	})
-	ForEachEvent(root, func(event IEvent) {
-		if event.Cond() == "" {
-			evdict[event.Name()] = append(evdict[event.Name()], event)
-		}
-	})
-	for _, event := range evlist {
-		fn(event, evdict[event])
-	}
-}
-
-/******************************************************************************/
-
-func AllEvents(root IState) []string {
-	var events []string
-	ForEachState(root, func(state IState) {
-		ForEachEvent(state, func(event IEvent) {
-			events = append(events, event.Name())
-		})
-	})
-	return StringSet(events)
-}
-
-func AllActions(root IState) []string {
-	var actions []string
-	ForEachState(root, func(state IState) {
-		ForEachEvent(state, func(event IEvent) {
-			actions = append(actions, event.Actions()...)
-		})
-		actions = append(actions, state.Entry()...)
-		actions = append(actions, state.Exit()...)
-	})
-	return StringSet(actions)
-}
-
-func AllConditions(root IState) []string {
-	var conditions []string
-	ForEachState(root, func(state IState) {
-		ForEachEvent(state, func(event IEvent) {
-			if event.Cond() != "" {
-				conditions = append(conditions, event.Cond())
+func AllConditions(root *State) []string {
+	var all []string
+	for _, state := range root.AllNested(root) {
+		for _, event := range state.Events() {
+			if event.HasCond() {
+				all = append(all, event.Cond())
 			}
-		})
-	})
-	return StringSet(conditions)
+		}
+	}
+	return StringSet(all)
+}
+
+func AllActions(root *State) []string {
+	var all []string
+	for _, state := range root.AllNested(root) {
+		for _, event := range state.Events() {
+			all = append(all, event.Actions()...)
+		}
+		all = append(all, state.Entry()...)
+		all = append(all, state.Exit()...)
+	}
+	return StringSet(all)
 }
 
 /******************************************************************************/
 
-func StringSet(list []string) (set []string) {
-	sort.Strings(list)
-	for idx, item := range list {
-		if idx != 0 && item == list[idx-1] {
-			continue
-		}
-		set = append(set, item)
-	}
-	return
+func Trim(text string) string {
+	return strings.TrimSpace(text)
 }
 
 func Camel(text string) string {
@@ -535,6 +364,31 @@ func Camel(text string) string {
 	}, text)
 	return text
 }
+
+func SplitAttr(text string) []string {
+	var list []string
+	for _, txt := range strings.Split(text, ",") {
+		if Trim(txt) != "" {
+			list = append(list, Trim(txt))
+		}
+	}
+	return list
+}
+
+func StringSet(list []string) []string {
+	var dict = make(map[string]bool)
+	for _, str := range list {
+		dict[str] = true
+	}
+	list = nil
+	for str, _ := range dict {
+		list = append(list, str)
+	}
+	sort.Strings(list)
+	return list
+}
+
+/******************************************************************************/
 
 func CheckWriteFile(filename string, text []byte) {
 	if data, err := ioutil.ReadFile(filename); err == nil {
@@ -557,88 +411,79 @@ func main() {
 		}
 	}()
 	if len(os.Args) != 4 {
-		panic("usage: smc [cs|cpp] <input-file> <output-file>")
+		panic("usage: smc [cs|cpp|gv] <input-file> <output-file>")
 	}
-	file, err := os.Open(os.Args[2])
+	var file, err = os.Open(os.Args[2])
 	if err != nil {
 		panic(err)
 	}
-	xmlroot := ReadXml(file)
-	fsmroot := FromXml(xmlroot.GetXmlState())
-	Validate(fsmroot)
-	ResolveEvents(fsmroot)
+	var root, name, ns, src = ReadXml(file)
+	root.PushEvents()
 	if os.Args[1] == "cs" {
 		var buffer = bytes.NewBuffer(nil)
-		CodeGenCs(buffer, fsmroot, fsmroot.Name(), xmlroot.Namespace)
-		buffer.Write(ToXml(xmlroot, "// "))
+		CodeGenCs(buffer, root, name, ns, src)
 		CheckWriteFile(os.Args[3], buffer.Bytes())
 	}
 	if os.Args[1] == "cpp" {
 		var buffer = bytes.NewBuffer(nil)
-		CodeGenCpp(buffer, fsmroot, fsmroot.Name(), xmlroot.Namespace)
-		buffer.Write(ToXml(xmlroot, "// "))
+		CodeGenCpp(buffer, root, name, ns, src)
 		CheckWriteFile(os.Args[3], buffer.Bytes())
 	}
 }
 
 /******************************************************************************/
 
-func CodeGenCs(file io.Writer, root IState, name, ns string) {
+func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 	var line = func(idt int, format string, args ...interface{}) {
 		fmt.Fprintf(file, strings.Repeat("\t", idt))
 		fmt.Fprintf(file, format, args...)
 		fmt.Fprintf(file, "\n")
 	}
-	var transition = func(idt int, event IEvent) {
-		var actions = MakeTransition(event)
-		for _, act := range actions {
-			if act.IsState() {
-				line(idt, "parent.CurrentState = InvalidState.Instance;")
-				break
-			}
+	var transition = func(idt int, event *Event) {
+		var actions, dst = MakeTransition(event)
+		if dst != nil && len(actions) != 0 {
+			line(idt, "parent.CurrentState = InvalidState.Instance;")
 		}
 		for _, act := range actions {
-			if act.IsFunc() {
-				line(idt, "parent.Handler.On%s();", Camel(act.Func()))
-			}
-			if act.IsState() {
-				line(idt, "parent.CurrentState = State%s.Instance;", Camel(act.State().Name()))
-			}
+			line(idt, "parent.Handler.On%s();", Camel(act))
+		}
+		if dst != nil {
+			line(idt, "parent.CurrentState = State%s.Instance;", Camel(dst.Name()))
 		}
 	}
+	var allcond = AllConditions(root)
+	var allact = AllActions(root)
+	var allev = AllEvents(root)
 	line(0, "using System;")
 	line(0, "")
 	line(0, "namespace %s {", ns)
 	line(1, "public class %s {", name)
 	line(2, "public interface IEventHandler {")
-	for _, cond := range AllConditions(root) {
+	for _, cond := range allcond {
 		line(3, "bool Cond%s();", Camel(cond))
 	}
-	for _, act := range AllActions(root) {
+	for _, act := range allact {
 		line(3, "void On%s();", Camel(act))
 	}
 	line(3, "void PostEvent(Action action);")
 	line(2, "}")
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(2, "public void Send%s() {", Camel(ev))
 		line(3, "CurrentState.On%s(this);", Camel(ev))
 		line(2, "}")
 	}
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(2, "public void Post%s() {", Camel(ev))
 		line(3, "Handler.PostEvent(() => Send%s());", Camel(ev))
 		line(2, "}")
 	}
 	line(2, "public void Start() {")
 	line(3, "if (CurrentState == null) {")
-	for _, act := range MakeInit(root) {
-		if act.IsFunc() {
-			line(4, "Handler.On%s();", Camel(act.Func()))
-		}
-		if act.IsState() {
-			line(4, "CurrentState = State%s.Instance;", Camel(act.State().Name()))
-		}
+	var actions, dst = MakeStart(root)
+	for _, act := range actions {
+		line(4, "Handler.On%s();", Camel(act))
 	}
+	line(4, "CurrentState = State%s.Instance;", Camel(dst.Name()))
 	line(3, "}")
 	line(2, "}")
 	line(2, "private class IState {")
@@ -655,13 +500,17 @@ func CodeGenCs(file io.Writer, root IState, name, ns string) {
 	}
 	line(3, "public static readonly IState Instance = new InvalidState();")
 	line(2, "}")
-	ForEachState(root, func(state IState) {
-		if state.IsLeaf() {
-			line(2, "private class State%s: IState {", Camel(state.Name()))
-			ForEachEventGrouped(state, func(evname string, events []IEvent) {
+	for _, state := range root.AllNested(root) {
+		if state.IsNested() {
+			continue
+		}
+		line(2, "private class State%s: IState {", Camel(state.Name()))
+		var groups = state.EventsGrouped()
+		for _, evname := range allev {
+			if events, found := groups[evname]; found {
 				line(3, "public override void On%s(%s parent) {", Camel(evname), name)
 				for _, event := range events {
-					if event.Cond() != "" {
+					if event.HasCond() {
 						line(4, "if (parent.Handler.Cond%s()) {", Camel(event.Cond()))
 						transition(5, event)
 						line(5, "return;")
@@ -671,11 +520,11 @@ func CodeGenCs(file io.Writer, root IState, name, ns string) {
 					}
 				}
 				line(3, "}")
-			})
-			line(3, "public static readonly IState Instance = new State%s();", Camel(state.Name()))
-			line(2, "}")
+			}
 		}
-	})
+		line(3, "public static readonly IState Instance = new State%s();", Camel(state.Name()))
+		line(2, "}")
+	}
 	line(2, "public %s(IEventHandler handler) {", name)
 	line(3, "Handler = handler;")
 	line(2, "}")
@@ -684,65 +533,63 @@ func CodeGenCs(file io.Writer, root IState, name, ns string) {
 	line(1, "}")
 	line(0, "}")
 	line(0, "")
+	line(0, "/*")
+	line(0, source)
+	line(0, "*/")
 }
 
 /******************************************************************************/
 
-func CodeGenCpp(file io.Writer, root IState, name, ns string) {
+func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 	var line = func(idt int, format string, args ...interface{}) {
 		fmt.Fprintf(file, strings.Repeat("\t", idt))
 		fmt.Fprintf(file, format, args...)
 		fmt.Fprintf(file, "\n")
 	}
-	var transition = func(idt int, event IEvent) {
-		var actions = MakeTransition(event)
-		for _, act := range actions {
-			if act.IsState() {
-				line(idt, "parent->SetInvalidState();")
-				break
-			}
+	var transition = func(idt int, event *Event) {
+		var actions, dst = MakeTransition(event)
+		if dst != nil && len(actions) != 0 {
+			line(idt, "parent->SetInvalidState();")
 		}
 		for _, act := range actions {
-			if act.IsFunc() {
-				line(idt, "parent->On%s();", Camel(act.Func()))
-			}
-			if act.IsState() {
-				line(idt, "parent->SetState%s();", Camel(act.State().Name()))
-			}
+			line(idt, "parent->On%s();", Camel(act))
+		}
+		if dst != nil {
+			line(idt, "parent->SetState%s();", Camel(dst.Name()))
 		}
 	}
+	var allcond = AllConditions(root)
+	var allact = AllActions(root)
+	var allev = AllEvents(root)
 	line(0, "#pragma once")
 	line(0, "")
 	line(0, "namespace %s {", ns)
 	line(1, "struct %s {", name)
 	line(2, "using Event = void (%s::*)();", name)
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(2, "void Send%s() {", Camel(ev))
 		line(3, "CurrentState->On%s(this);", Camel(ev))
 		line(2, "}")
 	}
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(2, "void Post%s() {", Camel(ev))
 		line(3, "PostEvent(&%s::Send%s);", name, Camel(ev))
 		line(2, "}")
 	}
 	line(2, "void Start() {")
 	line(3, "if (CurrentState == nullptr) {")
-	for _, act := range MakeInit(root) {
-		if act.IsFunc() {
-			line(4, "On%s();", Camel(act.Func()))
-		}
-		if act.IsState() {
-			line(4, "SetState%s();", Camel(act.State().Name()))
-		}
+	var actions, dst = MakeStart(root)
+	for _, act := range actions {
+		line(4, "On%s();", Camel(act))
 	}
+	line(4, "SetState%s();", Camel(dst.Name()))
 	line(3, "}")
 	line(2, "}")
 	line(1, "protected:")
-	for _, cond := range AllConditions(root) {
+	for _, cond := range allcond {
 		line(2, "virtual bool Cond%s() = 0;", Camel(cond))
 	}
-	for _, act := range AllActions(root) {
+	for _, act := range allact {
 		line(2, "virtual void On%s() = 0;", Camel(act))
 	}
 	line(2, "virtual void PostEvent(Event event) {")
@@ -752,25 +599,29 @@ func CodeGenCpp(file io.Writer, root IState, name, ns string) {
 	line(2, "}")
 	line(1, "private:")
 	line(2, "struct IState {")
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(3, "virtual void On%s(%s *) {", Camel(ev), name)
 		line(3, "}")
 	}
 	line(2, "};")
 	line(2, "struct InvalidState: IState {")
-	for _, ev := range AllEvents(root) {
+	for _, ev := range allev {
 		line(3, "void On%s(%s *) override {", Camel(ev), name)
 		line(4, "throw \"invalid state\";")
 		line(3, "}")
 	}
 	line(2, "};")
-	ForEachState(root, func(state IState) {
-		if state.IsLeaf() {
-			line(2, "struct State%s: IState {", Camel(state.Name()))
-			ForEachEventGrouped(state, func(evname string, events []IEvent) {
+	for _, state := range root.AllNested(root) {
+		if state.IsNested() {
+			continue
+		}
+		line(2, "struct State%s: IState {", Camel(state.Name()))
+		var groups = state.EventsGrouped()
+		for _, evname := range allev {
+			if events, found := groups[evname]; found {
 				line(3, "void On%s(%s *parent) override {", Camel(evname), name)
 				for _, event := range events {
-					if event.Cond() != "" {
+					if event.HasCond() {
 						line(4, "if (parent->Cond%s()) {", Camel(event.Cond()))
 						transition(5, event)
 						line(5, "return;")
@@ -780,27 +631,30 @@ func CodeGenCpp(file io.Writer, root IState, name, ns string) {
 					}
 				}
 				line(3, "}")
-			})
-			line(2, "};")
+			}
 		}
-	})
+		line(2, "}")
+	}
 	line(2, "void SetInvalidState() {")
 	line(3, "static InvalidState Instance;")
 	line(3, "CurrentState = &Instance;")
 	line(2, "}")
-	ForEachState(root, func(state IState) {
+	for _, state := range root.AllNested(root) {
 		if state.IsNested() {
-			return
+			continue
 		}
 		line(2, "void SetState%s() {", Camel(state.Name()))
 		line(3, "static State%s Instance;", Camel(state.Name()))
 		line(3, "CurrentState = &Instance;")
 		line(2, "}")
-	})
+	}
 	line(2, "IState *CurrentState = nullptr;")
 	line(1, "};")
 	line(0, "}")
 	line(0, "")
+	line(0, "/*")
+	line(0, source)
+	line(0, "*/")
 }
 
 /******************************************************************************/
