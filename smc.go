@@ -411,7 +411,7 @@ func main() {
 		}
 	}()
 	if len(os.Args) != 4 {
-		panic("usage: smc [cs|cpp|gv] <input-file> <output-file>")
+		panic("usage: smc [cs|cpp] <input-file> <output-file>")
 	}
 	var file, err = os.Open(os.Args[2])
 	if err != nil {
