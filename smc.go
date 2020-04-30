@@ -646,7 +646,7 @@ func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 				line(3, "}")
 			}
 		}
-		line(2, "}")
+		line(2, "};")
 	}
 	line(2, "void SetInvalidState() {")
 	line(3, "static InvalidState Instance;")
