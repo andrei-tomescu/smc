@@ -89,7 +89,7 @@ func (this XReader) Add(name string, setfn func(*State)) {
 }
 
 func (this XReader) Invoke(root *State) {
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		if state.name == "" {
 			continue
 		}
@@ -159,7 +159,10 @@ func (state *State) FollowStart() *State {
 	if state.start == nil {
 		panic("missing start in state " + state.Name())
 	}
-	return state.start.FollowStart()
+	if state.start.IsDescendantOf(state) {
+		return state.start.FollowStart()
+	}
+	panic("invalid start in state " + state.Name())
 }
 func (state *State) Parent() *State {
 	return state.parent
@@ -170,13 +173,13 @@ func (state *State) Entry() []string {
 func (state *State) Exit() []string {
 	return state.exit
 }
-func (state *State) Nested() []*State {
+func (state *State) Children() []*State {
 	return state.nested
 }
-func (state *State) AllNested(states ...*State) []*State {
-	for _, st := range state.nested {
-		states = append(states, st)
-		states = st.AllNested(states...)
+func (state *State) AllDescendants(states ...*State) []*State {
+	for _, child := range state.nested {
+		states = append(states, child)
+		states = child.AllDescendants(states...)
 	}
 	return states
 }
@@ -185,6 +188,15 @@ func (state *State) IsNested() bool {
 }
 func (state *State) IsLeaf() bool {
 	return len(state.nested) == 0
+}
+func (state *State) IsDescendantOf(other *State) bool {
+	if state == other {
+		return true
+	}
+	if state.parent == nil {
+		return false
+	}
+	return state.parent.IsDescendantOf(other)
 }
 func (state *State) Path() []*State {
 	if state.parent == nil {
@@ -230,10 +242,10 @@ func (state *State) AddEvent(event *Event) bool {
 	return false
 }
 func (state *State) PushEvents() {
-	for _, child := range state.Nested() {
+	for _, child := range state.Children() {
 		child.PushEvents()
 	}
-	for _, child := range state.AllNested() {
+	for _, child := range state.AllDescendants() {
 		for _, event := range state.Events() {
 			child.AddEvent(&Event{
 				event.name,
@@ -262,7 +274,7 @@ func (event *Event) Actions() []string {
 	return event.act
 }
 func (event *Event) IsInternal() bool {
-	return event.dst == nil
+	return event.dst == nil || event.src.IsDescendantOf(event.dst)
 }
 func (event *Event) HasCond() bool {
 	return event.cond != ""
@@ -294,12 +306,13 @@ func MakeExit(path []*State) []string {
 func MakeTransition(event *Event) ([]string, *State) {
 	if event.IsInternal() {
 		return event.Actions(), nil
+	} else {
+		var expath, enpath = event.Src().Diff(event.Dst().FollowStart())
+		var exit = MakeExit(expath)
+		var actions = event.Actions()
+		var entry, dst = MakeEntry(enpath)
+		return append(exit, append(actions, entry...)...), dst
 	}
-	var srcpath, dstpath = event.Src().Diff(event.Dst().FollowStart())
-	var exit = MakeExit(srcpath)
-	var actions = event.Actions()
-	var entry, dst = MakeEntry(dstpath)
-	return append(exit, append(actions, entry...)...), dst
 }
 
 func MakeStart(root *State) ([]string, *State) {
@@ -310,7 +323,7 @@ func MakeStart(root *State) ([]string, *State) {
 
 func AllEvents(root *State) []string {
 	var all []string
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		for _, event := range state.Events() {
 			all = append(all, event.Name())
 		}
@@ -320,7 +333,7 @@ func AllEvents(root *State) []string {
 
 func AllConditions(root *State) []string {
 	var all []string
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		for _, event := range state.Events() {
 			if event.HasCond() {
 				all = append(all, event.Cond())
@@ -332,7 +345,7 @@ func AllConditions(root *State) []string {
 
 func AllActions(root *State) []string {
 	var all []string
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		for _, event := range state.Events() {
 			all = append(all, event.Actions()...)
 		}
@@ -500,7 +513,7 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 	}
 	line(3, "public static readonly IState Instance = new InvalidState();")
 	line(2, "}")
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		if state.IsNested() {
 			continue
 		}
@@ -611,7 +624,7 @@ func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 		line(3, "}")
 	}
 	line(2, "};")
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		if state.IsNested() {
 			continue
 		}
@@ -639,7 +652,7 @@ func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 	line(3, "static InvalidState Instance;")
 	line(3, "CurrentState = &Instance;")
 	line(2, "}")
-	for _, state := range root.AllNested(root) {
+	for _, state := range root.AllDescendants(root) {
 		if state.IsNested() {
 			continue
 		}
