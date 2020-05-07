@@ -470,8 +470,8 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 	line(0, "using System;")
 	line(0, "")
 	line(0, "namespace %s {", ns)
-	line(1, "public class %s {", name)
-	line(2, "public interface IEventHandler {")
+	line(1, "public sealed class %s {", name)
+	line(2, "public interface IHandler {")
 	for _, cond := range allcond {
 		line(3, "bool Cond%s();", Camel(cond))
 	}
@@ -479,6 +479,24 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 		line(3, "void On%s();", Camel(act))
 	}
 	line(3, "void PostEvent(Action action);")
+	line(2, "}")
+	line(2, "public sealed class DelegateHandler: IHandler {")
+	for _, cond := range allcond {
+		line(3, "public bool Cond%s() {", Camel(cond))
+		line(4, "return cond%s();", Camel(cond))
+		line(3, "}")
+		line(3, "public Func<bool> cond%s {get; set;}", Camel(cond))
+	}
+	for _, act := range allact {
+		line(3, "public void On%s() {", Camel(act))
+		line(4, "on%s();", Camel(act))
+		line(3, "}")
+		line(3, "public Action on%s {get; set;}", Camel(act))
+	}
+	line(3, "public void PostEvent(Action action) {")
+	line(4, "postEvent(action);")
+	line(3, "}")
+	line(3, "public Action<Action> postEvent {get; set;}")
 	line(2, "}")
 	for _, ev := range allev {
 		line(2, "public void Send%s() {", Camel(ev))
@@ -538,10 +556,10 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 		line(3, "public static readonly IState Instance = new State%s();", Camel(state.Name()))
 		line(2, "}")
 	}
-	line(2, "public %s(IEventHandler handler) {", name)
+	line(2, "public %s(IHandler handler) {", name)
 	line(3, "Handler = handler;")
 	line(2, "}")
-	line(2, "private readonly IEventHandler Handler;")
+	line(2, "private readonly IHandler Handler;")
 	line(2, "private IState CurrentState;")
 	line(1, "}")
 	line(0, "}")
