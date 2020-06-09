@@ -2,129 +2,15 @@ package main
 
 import (
 	"bytes"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
+	"text/scanner"
 	"unicode"
 )
-
-/******************************************************************************/
-
-type XEvent struct {
-	Name string `xml:"id,attr"`
-	Cond string `xml:"if,attr,omitempty"`
-	Dst  string `xml:"dst,attr,omitempty"`
-	Act  string `xml:"act,attr,omitempty"`
-}
-
-type XState struct {
-	Name   string   `xml:"id,attr,omitempty"`
-	Entry  string   `xml:"entry,attr,omitempty"`
-	Exit   string   `xml:"exit,attr,omitempty"`
-	Start  string   `xml:"start,attr,omitempty"`
-	States []XState `xml:"state"`
-	Events []XEvent `xml:"event"`
-}
-
-type XRoot struct {
-	XMLName   xml.Name `xml:"fsm"`
-	Namespace string   `xml:"ns,attr"`
-	Name      string   `xml:"name,attr"`
-	Start     string   `xml:"start,attr"`
-	States    []XState `xml:"state"`
-	Events    []XEvent `xml:"event"`
-}
-
-func (xroot XRoot) GetState() XState {
-	return XState{
-		States: xroot.States,
-		Events: xroot.Events,
-		Start:  xroot.Start,
-	}
-}
-
-/******************************************************************************/
-
-type XReader map[string][]func(*State)
-
-func (this XReader) CreateState(xroot XState, parent *State) *State {
-	var root = &State{
-		name:   Trim(xroot.Name),
-		parent: parent,
-		entry:  SplitAttr(xroot.Entry),
-		exit:   SplitAttr(xroot.Exit),
-	}
-	this.Add(Trim(xroot.Start), func(state *State) {
-		root.start = state
-	})
-	for _, xchild := range xroot.States {
-		root.AddState(this.CreateState(xchild, root))
-	}
-	for _, xevent := range xroot.Events {
-		var event = &Event{
-			name: Trim(xevent.Name),
-			cond: Trim(xevent.Cond),
-			src:  root,
-			act:  SplitAttr(xevent.Act),
-		}
-		if root.AddEvent(event) {
-			panic("event " + event.name + " redeclared in state " + root.name)
-		}
-		this.Add(Trim(xevent.Dst), func(state *State) {
-			event.dst = state
-		})
-	}
-	return root
-}
-
-func (this XReader) Add(name string, setfn func(*State)) {
-	if name == "" {
-		return
-	}
-	this[name] = append(this[name], setfn)
-}
-
-func (this XReader) Invoke(root *State) {
-	for _, state := range root.AllDescendants(root) {
-		if state.name == "" {
-			continue
-		}
-		if list, ok := this[state.name]; ok {
-			for _, setfn := range list {
-				setfn(state)
-			}
-		}
-		this[state.name] = nil
-	}
-	for name, list := range this {
-		if len(list) != 0 {
-			panic("unknown state " + name)
-		}
-	}
-}
-
-/******************************************************************************/
-
-func ReadXml(file io.Reader) (*State, string, string, string) {
-	var reader = make(XReader)
-	var xroot XRoot
-	var data, err = ioutil.ReadAll(file)
-	if err != nil {
-		panic(err)
-	}
-	err = xml.Unmarshal(data, &xroot)
-	if err != nil {
-		panic(err)
-	}
-	var root = reader.CreateState(xroot.GetState(), nil)
-	reader.Invoke(root)
-	var text, _ = xml.MarshalIndent(xroot, "", "\t")
-	return root, xroot.Name, xroot.Namespace, string(text)
-}
 
 /******************************************************************************/
 
@@ -357,10 +243,6 @@ func AllActions(root *State) []string {
 
 /******************************************************************************/
 
-func Trim(text string) string {
-	return strings.TrimSpace(text)
-}
-
 func Camel(text string) string {
 	text = strings.Map(func(chr rune) rune {
 		if unicode.In(chr, unicode.Letter, unicode.Digit) {
@@ -378,14 +260,10 @@ func Camel(text string) string {
 	return text
 }
 
-func SplitAttr(text string) []string {
-	var list []string
-	for _, txt := range strings.Split(text, ",") {
-		if Trim(txt) != "" {
-			list = append(list, Trim(txt))
-		}
-	}
-	return list
+func SplitName(text string) (string, []string) {
+	var tokens = strings.Split(text, ".")
+	var last = len(tokens) - 1
+	return tokens[last], tokens[:last]
 }
 
 func StringSet(list []string) []string {
@@ -430,27 +308,28 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	var root, name, ns, src = ReadXml(file)
+	var root = Scan(file)
+	var src = PrintRoot(root, "")
 	root.PushEvents()
 	if os.Args[1] == "cs" {
 		var buffer = bytes.NewBuffer(nil)
-		CodeGenCs(buffer, root, name, ns, src)
+		CodeGenCs(buffer, root, src)
 		CheckWriteFile(os.Args[3], buffer.Bytes())
 	}
 	if os.Args[1] == "cpp" {
 		var buffer = bytes.NewBuffer(nil)
-		CodeGenCpp(buffer, root, name, ns, src)
+		CodeGenCpp(buffer, root, src)
 		CheckWriteFile(os.Args[3], buffer.Bytes())
 	}
 }
 
 /******************************************************************************/
 
-func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
+func CodeGenCs(file io.Writer, root *State, source []string) {
 	var line = func(idt int, format string, args ...interface{}) {
 		fmt.Fprintf(file, strings.Repeat("\t", idt))
 		fmt.Fprintf(file, format, args...)
-		fmt.Fprintf(file, "\n")
+		fmt.Fprintf(file, "\r\n")
 	}
 	var transition = func(idt int, event *Event) {
 		var actions, dst = MakeTransition(event)
@@ -464,12 +343,13 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 			line(idt, "parent.CurrentState = State%s.Instance;", Camel(dst.Name()))
 		}
 	}
+	var name, ns = SplitName(root.Name())
 	var allcond = AllConditions(root)
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
 	line(0, "using System;")
 	line(0, "")
-	line(0, "namespace %s {", ns)
+	line(0, "namespace %s {", strings.Join(ns, "."))
 	line(1, "public sealed class %s {", name)
 	line(2, "public interface IHandler {")
 	for _, cond := range allcond {
@@ -485,18 +365,18 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 		line(3, "public bool Cond%s() {", Camel(cond))
 		line(4, "return cond%s();", Camel(cond))
 		line(3, "}")
-		line(3, "public Func<bool> cond%s {get; set;}", Camel(cond))
+		line(3, "public Func<bool> cond%s { get; set; }", Camel(cond))
 	}
 	for _, act := range allact {
 		line(3, "public void On%s() {", Camel(act))
 		line(4, "on%s();", Camel(act))
 		line(3, "}")
-		line(3, "public Action on%s {get; set;}", Camel(act))
+		line(3, "public Action on%s { get; set; }", Camel(act))
 	}
 	line(3, "public void PostEvent(Action action) {")
 	line(4, "postEvent(action);")
 	line(3, "}")
-	line(3, "public Action<Action> postEvent {get; set;}")
+	line(3, "public Action<Action> postEvent { get; set; }")
 	line(2, "}")
 	for _, ev := range allev {
 		line(2, "public void Send%s() {", Camel(ev))
@@ -565,17 +445,17 @@ func CodeGenCs(file io.Writer, root *State, name, ns, source string) {
 	line(0, "}")
 	line(0, "")
 	line(0, "/*")
-	line(0, source)
+	line(0, strings.Join(source, "\r\n"))
 	line(0, "*/")
 }
 
 /******************************************************************************/
 
-func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
+func CodeGenCpp(file io.Writer, root *State, source []string) {
 	var line = func(idt int, format string, args ...interface{}) {
 		fmt.Fprintf(file, strings.Repeat("\t", idt))
 		fmt.Fprintf(file, format, args...)
-		fmt.Fprintf(file, "\n")
+		fmt.Fprintf(file, "\r\n")
 	}
 	var transition = func(idt int, event *Event) {
 		var actions, dst = MakeTransition(event)
@@ -589,12 +469,13 @@ func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 			line(idt, "parent->SetState%s();", Camel(dst.Name()))
 		}
 	}
+	var name, ns = SplitName(root.Name())
 	var allcond = AllConditions(root)
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
 	line(0, "#pragma once")
 	line(0, "")
-	line(0, "namespace %s {", ns)
+	line(0, "namespace %s {", strings.Join(ns, "::"))
 	line(1, "struct %s {", name)
 	line(2, "using Event = void (%s::*)();", name)
 	for _, ev := range allev {
@@ -684,8 +565,449 @@ func CodeGenCpp(file io.Writer, root *State, name, ns, source string) {
 	line(0, "}")
 	line(0, "")
 	line(0, "/*")
-	line(0, source)
+	line(0, strings.Join(source, "\r\n"))
 	line(0, "*/")
 }
 
 /******************************************************************************/
+
+func PrintRoot(state *State, indent string) (lines []string) {
+	var line = func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	line("%s%s {", indent, state.name)
+	if state.entry != nil {
+		line("%s\tentry %s;", indent, strings.Join(state.entry, ", "))
+	}
+	if state.exit != nil {
+		line("%s\texit %s;", indent, strings.Join(state.exit, ", "))
+	}
+	if state.start != nil {
+		line("%s\tstart %s;", indent, state.start.name)
+	}
+	for _, st := range state.nested {
+		lines = append(lines, PrintState(st, indent+"\t")...)
+	}
+	for _, ev := range state.events {
+		lines = append(lines, PrintEvent(ev, indent+"\t")...)
+	}
+	line("%s}", indent)
+	return
+}
+
+func PrintState(state *State, indent string) (lines []string) {
+	var line = func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	if state.start != nil || state.entry != nil || state.exit != nil || state.nested != nil || state.events != nil {
+		if state.name == "" {
+			line("%sstate {", indent)
+		} else {
+			line("%sstate %s {", indent, state.name)
+		}
+		if state.entry != nil {
+			line("%s\tentry %s;", indent, strings.Join(state.entry, ", "))
+		}
+		if state.exit != nil {
+			line("%s\texit %s;", indent, strings.Join(state.exit, ", "))
+		}
+		if state.start != nil {
+			line("%s\tstart %s;", indent, state.start.name)
+		}
+		for _, st := range state.nested {
+			lines = append(lines, PrintState(st, indent+"\t")...)
+		}
+		for _, ev := range state.events {
+			lines = append(lines, PrintEvent(ev, indent+"\t")...)
+		}
+		line("%s}", indent)
+		return
+	}
+	line("%sstate %s;", indent, state.name)
+	return
+}
+
+func PrintEvent(event *Event, indent string) (lines []string) {
+	var line string
+	if event.cond == "" {
+		line = fmt.Sprintf("%sevent %s", indent, event.name)
+	} else {
+		line = fmt.Sprintf("%sevent %s if %s", indent, event.name, event.cond)
+	}
+	if event.dst != nil || event.act != nil {
+		line += " {"
+		if event.dst != nil {
+			line += fmt.Sprintf(" dst %s;", event.dst.name)
+		}
+		if event.act != nil {
+			line += fmt.Sprintf(" act %s;", strings.Join(event.act, ", "))
+		}
+		line += " }"
+	} else {
+		line += ";"
+	}
+	lines = append(lines, line)
+	return
+}
+
+/******************************************************************************/
+
+func Scan(file io.Reader) *State {
+	const (
+		ROOT_BEGIN = iota
+		ROOT_NAME
+		ROOT_NEXT
+		STATE_ENTRY
+		STATE_ENTRY_NEXT
+		STATE_EXIT
+		STATE_EXIT_NEXT
+		STATE_NAME
+		STATE_NAME_NEXT
+		STATE_NEXT
+		STATE_START
+		STATE_START_NEXT
+		EVENT_ACT
+		EVENT_ACT_NEXT
+		EVENT_COND
+		EVENT_COND_NEXT
+		EVENT_DST
+		EVENT_DST_NEXT
+		EVENT_NAME
+		EVENT_NAME_NEXT
+		EVENT_NEXT
+	)
+	var (
+		state *State
+		event *Event
+		where = ROOT_BEGIN
+		names = make(map[string][]func(*State))
+		scan  scanner.Scanner
+	)
+	var (
+		onRootBegin = func() {
+			state = &State{name: scan.TokenText()}
+		}
+		onRootName = func() {
+			state.name += "." + scan.TokenText()
+		}
+		onStateBegin = func() {
+			state = &State{parent: state}
+		}
+		onStateEnd = func() bool {
+			if state.parent == nil {
+				return true
+			}
+			state.parent.AddState(state)
+			state = state.parent
+			return false
+		}
+		onStateName = func() {
+			state.name = scan.TokenText()
+		}
+		onStateStart = func() {
+			var this = state
+			var text = scan.TokenText()
+			names[text] = append(names[text], func(st *State) {
+				this.start = st
+			})
+		}
+		onStateEntry = func() {
+			state.entry = append(state.entry, scan.TokenText())
+		}
+		onStateExit = func() {
+			state.exit = append(state.exit, scan.TokenText())
+		}
+		onEventBegin = func() {
+			event = &Event{src: state}
+		}
+		onEventEnd = func() {
+			state.AddEvent(event)
+		}
+		onEventName = func() {
+			event.name = scan.TokenText()
+		}
+		onEventCond = func() {
+			event.cond = scan.TokenText()
+		}
+		onEventAct = func() {
+			event.act = append(event.act, scan.TokenText())
+		}
+		onEventDst = func() {
+			var this = event
+			var text = scan.TokenText()
+			names[text] = append(names[text], func(st *State) {
+				this.dst = st
+			})
+		}
+		errorUnexpected = func() {
+			panic(scan.Pos().String() + ": unexpected " + scan.TokenText())
+		}
+	)
+	defer func() {
+		for _, st := range state.AllDescendants(state) {
+			if list, ok := names[st.name]; ok {
+				for _, fn := range list {
+					fn(st)
+				}
+				names[st.name] = nil
+			}
+		}
+		for name, list := range names {
+			if len(list) != 0 {
+				panic("unknown state " + name)
+			}
+		}
+	}()
+	scan.Init(file)
+	scan.Mode = scanner.ScanIdents | scanner.ScanComments | scanner.SkipComments
+	for {
+		switch where {
+		case EVENT_ACT:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onEventAct()
+				where = EVENT_ACT_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_ACT_NEXT:
+			switch scan.Scan() {
+			case ',':
+				where = EVENT_ACT
+			case ';':
+				where = EVENT_NEXT
+			case '}':
+				onEventEnd()
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_COND:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onEventCond()
+				where = EVENT_COND_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_COND_NEXT:
+			switch scan.Scan() {
+			case ';':
+				onEventEnd()
+				where = STATE_NEXT
+			case '{':
+				where = EVENT_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_DST:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onEventDst()
+				where = EVENT_DST_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_DST_NEXT:
+			switch scan.Scan() {
+			case ';':
+				where = EVENT_NEXT
+			case '}':
+				onEventEnd()
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_NAME:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onEventName()
+				where = EVENT_NAME_NEXT
+			default:
+				errorUnexpected()
+			}
+		case EVENT_NAME_NEXT:
+			switch scan.Scan() {
+			case ';':
+				onEventEnd()
+				where = STATE_NEXT
+			case '{':
+				where = EVENT_NEXT
+			case scanner.Ident:
+				switch scan.TokenText() {
+				case "if":
+					where = EVENT_COND
+				default:
+					errorUnexpected()
+				}
+			default:
+				errorUnexpected()
+			}
+		case EVENT_NEXT:
+			switch scan.Scan() {
+			case ';':
+				where = EVENT_NEXT
+			case '}':
+				onEventEnd()
+				where = STATE_NEXT
+			case scanner.Ident:
+				switch scan.TokenText() {
+				case "act":
+					where = EVENT_ACT
+				case "dst":
+					where = EVENT_DST
+				default:
+					errorUnexpected()
+				}
+			default:
+				errorUnexpected()
+			}
+		case ROOT_BEGIN:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onRootBegin()
+				where = ROOT_NEXT
+			default:
+				errorUnexpected()
+			}
+		case ROOT_NAME:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onRootName()
+				where = ROOT_NEXT
+			default:
+				errorUnexpected()
+			}
+		case ROOT_NEXT:
+			switch scan.Scan() {
+			case '.':
+				where = ROOT_NAME
+			case '{':
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_ENTRY:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onStateEntry()
+				where = STATE_ENTRY_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_ENTRY_NEXT:
+			switch scan.Scan() {
+			case ',':
+				where = STATE_ENTRY
+			case ';':
+				where = STATE_NEXT
+			case '}':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_EXIT:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onStateExit()
+				where = STATE_EXIT_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_EXIT_NEXT:
+			switch scan.Scan() {
+			case ',':
+				where = STATE_EXIT
+			case ';':
+				where = STATE_NEXT
+			case '}':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_NAME:
+			switch scan.Scan() {
+			case ';':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			case '{':
+				where = STATE_NEXT
+			case scanner.Ident:
+				onStateName()
+				where = STATE_NAME_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_NAME_NEXT:
+			switch scan.Scan() {
+			case ';':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			case '{':
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_NEXT:
+			switch scan.Scan() {
+			case ';':
+				where = STATE_NEXT
+			case '}':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			case scanner.Ident:
+				switch scan.TokenText() {
+				case "entry":
+					where = STATE_ENTRY
+				case "event":
+					onEventBegin()
+					where = EVENT_NAME
+				case "exit":
+					where = STATE_EXIT
+				case "start":
+					where = STATE_START
+				case "state":
+					onStateBegin()
+					where = STATE_NAME
+				default:
+					errorUnexpected()
+				}
+			default:
+				errorUnexpected()
+			}
+		case STATE_START:
+			switch scan.Scan() {
+			case scanner.Ident:
+				onStateStart()
+				where = STATE_START_NEXT
+			default:
+				errorUnexpected()
+			}
+		case STATE_START_NEXT:
+			switch scan.Scan() {
+			case ';':
+				where = STATE_NEXT
+			case '}':
+				if onStateEnd() {
+					return state
+				}
+				where = STATE_NEXT
+			default:
+				errorUnexpected()
+			}
+		}
+	}
+	return nil
+}
