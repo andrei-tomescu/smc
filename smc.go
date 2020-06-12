@@ -43,12 +43,12 @@ func (state *State) FollowStart() *State {
 		return state
 	}
 	if state.start == nil {
-		panic("missing start in state " + state.Name())
+		panic(state.Name() + ": missing start")
 	}
 	if state.start.IsDescendantOf(state) {
 		return state.start.FollowStart()
 	}
-	panic("invalid start in state " + state.Name())
+	panic(state.Name() + ": invalid start")
 }
 func (state *State) Parent() *State {
 	return state.parent
@@ -721,7 +721,9 @@ func Scan(file io.Reader) *State {
 			event = &Event{src: state}
 		}
 		onEventEnd = func() {
-			state.AddEvent(event)
+			if state.AddEvent(event) {
+				panic(scan.Pos().String() + ": event " + event.Name() + " redeclared")
+			}
 		}
 		onEventName = func() {
 			event.name = scan.TokenText()
