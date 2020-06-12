@@ -744,6 +744,9 @@ func Scan(file io.Reader) *State {
 		}
 	)
 	defer func() {
+		if err := recover(); err != nil {
+			panic(err)
+		}
 		for _, st := range state.AllDescendants(state) {
 			if list, ok := names[st.name]; ok {
 				for _, fn := range list {
