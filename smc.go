@@ -302,7 +302,7 @@ func main() {
 		}
 	}()
 	if len(os.Args) != 4 {
-		panic("usage: smc [cs|cpp] <input-file> <output-file>")
+		panic("usage: smc [cs|cpp|go] <input-file> <output-file>")
 	}
 	var file, err = os.Open(os.Args[2])
 	if err != nil {
@@ -319,6 +319,11 @@ func main() {
 	if os.Args[1] == "cpp" {
 		var buffer = bytes.NewBuffer(nil)
 		CodeGenCpp(buffer, root, src)
+		CheckWriteFile(os.Args[3], buffer.Bytes())
+	}
+	if os.Args[1] == "go" {
+		var buffer = bytes.NewBuffer(nil)
+		CodeGenGo(buffer, root, src)
 		CheckWriteFile(os.Args[3], buffer.Bytes())
 	}
 }
@@ -385,7 +390,7 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	}
 	for _, ev := range allev {
 		line(2, "public void Post%s() {", Camel(ev))
-		line(3, "Handler.PostEvent(() => Send%s());", Camel(ev))
+		line(3, "Handler.PostEvent(Send%s);", Camel(ev))
 		line(2, "}")
 	}
 	line(2, "public void Start() {")
@@ -477,7 +482,6 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	line(0, "")
 	line(0, "namespace %s {", strings.Join(ns, "::"))
 	line(1, "struct %s {", name)
-	line(2, "using Event = void (%s::*)();", name)
 	for _, ev := range allev {
 		line(2, "void Send%s() {", Camel(ev))
 		line(3, "CurrentState->On%s(this);", Camel(ev))
@@ -497,14 +501,19 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	line(4, "SetState%s();", Camel(dst.Name()))
 	line(3, "}")
 	line(2, "}")
+	line(2, "using Event = void (%s::*)();", name)
 	line(1, "protected:")
-	for _, cond := range allcond {
-		line(2, "virtual bool Cond%s() = 0;", Camel(cond))
-	}
 	for _, act := range allact {
-		line(2, "virtual void On%s() = 0;", Camel(act))
+		line(2, "virtual void On%s() {", Camel(act))
+		line(2, "}")
+	}
+	for _, cond := range allcond {
+		line(2, "virtual bool Cond%s() const {", Camel(cond))
+		line(3, "throw \"not implemented: Cond%s\";", Camel(cond))
+		line(2, "}")
 	}
 	line(2, "virtual void PostEvent(Event event) {")
+	line(3, "throw \"not implemented: PostEvent\";")
 	line(2, "}")
 	line(2, "void ProcessEvent(Event event) {")
 	line(3, "(this->*event)();")
@@ -562,6 +571,102 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	}
 	line(2, "IState *CurrentState = nullptr;")
 	line(1, "};")
+	line(0, "}")
+	line(0, "")
+	line(0, "/*")
+	line(0, strings.Join(source, "\r\n"))
+	line(0, "*/")
+}
+
+/******************************************************************************/
+
+func CodeGenGo(file io.Writer, root *State, source []string) {
+	var line = func(idt int, format string, args ...interface{}) {
+		fmt.Fprintf(file, strings.Repeat("\t", idt))
+		fmt.Fprintf(file, format, args...)
+		fmt.Fprintf(file, "\r\n")
+	}
+	var transition = func(idt int, event *Event) {
+		var actions, dst = MakeTransition(event)
+		if dst != nil && len(actions) != 0 {
+			line(idt, "current = nil")
+		}
+		for _, act := range actions {
+			line(idt, "this.On%s()", Camel(act))
+		}
+		if dst != nil {
+			line(idt, "current = fn%s", Camel(dst.Name()))
+		}
+	}
+	var name, ns = SplitName(root.Name())
+	var allcond = AllConditions(root)
+	var allact = AllActions(root)
+	var allev = AllEvents(root)
+	line(0, "package %s", strings.Join(ns, "_"))
+	line(0, "")
+	line(0, "type %s struct {", name)
+	for _, ev := range allev {
+		line(1, "Send%s func()", Camel(ev))
+	}
+	line(1, "Start func()")
+	for _, act := range allact {
+		line(1, "On%s func()", Camel(act))
+	}
+	for _, cond := range allcond {
+		line(1, "Cond%s func() bool", Camel(cond))
+	}
+	line(0, "}")
+	line(0, "")
+	line(0, "func New%s() *%s {", name, name)
+	line(1, "var (")
+	for _, state := range root.AllDescendants(root) {
+		if state.IsLeaf() {
+			line(2, "fn%s []func()", Camel(state.Name()))
+		}
+	}
+	line(2, "current []func()")
+	line(1, ")")
+	line(1, "var this = %s{", name)
+	for idx, ev := range allev {
+		line(2, "Send%s: func() {", Camel(ev))
+		line(3, "current[%d]()", idx)
+		line(2, "},")
+	}
+	line(2, "Start: func() {")
+	line(3, "if current == nil {")
+	var actions, dst = MakeStart(root)
+	for _, act := range actions {
+		line(4, "this.On%s()", Camel(act))
+	}
+	line(4, "current = fn%s", Camel(dst.Name()))
+	line(3, "}")
+	line(2, "},")
+	line(1, "}")
+	for _, state := range root.AllDescendants(root) {
+		if state.IsNested() {
+			continue
+		}
+		line(1, "fn%s = []func() {", Camel(state.Name()))
+		var groups = state.EventsGrouped()
+		for _, evname := range allev {
+			line(2, "func() {")
+			if events, found := groups[evname]; found {
+				for _, event := range events {
+					if event.HasCond() {
+						line(3, "if this.Cond%s() {", Camel(event.Cond()))
+						transition(4, event)
+						line(4, "return")
+						line(3, "}")
+					} else {
+						transition(3, event)
+					}
+				}
+			}
+			line(2, "},")
+		}
+		line(1, "}")
+	}
+	line(1, "return &this")
 	line(0, "}")
 	line(0, "")
 	line(0, "/*")
@@ -653,366 +758,628 @@ func PrintEvent(event *Event, indent string) (lines []string) {
 /******************************************************************************/
 
 func Scan(file io.Reader) *State {
-	const (
-		ROOT_BEGIN = iota
-		ROOT_NAME
-		ROOT_NEXT
-		STATE_ENTRY
-		STATE_ENTRY_NEXT
-		STATE_EXIT
-		STATE_EXIT_NEXT
-		STATE_NAME
-		STATE_NAME_NEXT
-		STATE_NEXT
-		STATE_START
-		STATE_START_NEXT
-		EVENT_ACT
-		EVENT_ACT_NEXT
-		EVENT_COND
-		EVENT_COND_NEXT
-		EVENT_DST
-		EVENT_DST_NEXT
-		EVENT_NAME
-		EVENT_NAME_NEXT
-		EVENT_NEXT
-	)
 	var (
-		state *State
-		event *Event
-		where = ROOT_BEGIN
-		names = make(map[string][]func(*State))
-		scan  scanner.Scanner
+		root   *State
+		state  *State
+		event  *Event
+		scan   scanner.Scanner
+		next   rune
+		names  = make(map[string][]func(*State))
+		parser = NewParser()
 	)
-	var (
-		onRootBegin = func() {
-			state = &State{name: scan.TokenText()}
-		}
-		onRootName = func() {
-			state.name += "." + scan.TokenText()
-		}
-		onStateBegin = func() {
-			state = &State{parent: state}
-		}
-		onStateEnd = func() bool {
-			if state.parent == nil {
-				return true
-			}
-			state.parent.AddState(state)
-			state = state.parent
-			return false
-		}
-		onStateName = func() {
-			state.name = scan.TokenText()
-		}
-		onStateStart = func() {
-			var this = state
-			var text = scan.TokenText()
-			names[text] = append(names[text], func(st *State) {
-				this.start = st
-			})
-		}
-		onStateEntry = func() {
-			state.entry = append(state.entry, scan.TokenText())
-		}
-		onStateExit = func() {
-			state.exit = append(state.exit, scan.TokenText())
-		}
-		onEventBegin = func() {
-			event = &Event{src: state}
-		}
-		onEventEnd = func() {
-			if state.AddEvent(event) {
-				panic(scan.Pos().String() + ": event " + event.Name() + " redeclared")
-			}
-		}
-		onEventName = func() {
-			event.name = scan.TokenText()
-		}
-		onEventCond = func() {
-			event.cond = scan.TokenText()
-		}
-		onEventAct = func() {
-			event.act = append(event.act, scan.TokenText())
-		}
-		onEventDst = func() {
-			var this = event
-			var text = scan.TokenText()
-			names[text] = append(names[text], func(st *State) {
-				this.dst = st
-			})
-		}
-		errorUnexpected = func() {
-			panic(scan.Pos().String() + ": unexpected " + scan.TokenText())
-		}
-	)
-	defer func() {
-		if err := recover(); err != nil {
-			panic(err)
-		}
-		for _, st := range state.AllDescendants(state) {
-			if list, ok := names[st.name]; ok {
-				for _, fn := range list {
-					fn(st)
-				}
-				names[st.name] = nil
-			}
-		}
-		for name, list := range names {
-			if len(list) != 0 {
-				panic("unknown state " + name)
-			}
-		}
-	}()
-	scan.Init(file)
-	scan.Mode = scanner.ScanIdents | scanner.ScanComments | scanner.SkipComments
-	for {
-		switch where {
-		case EVENT_ACT:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onEventAct()
-				where = EVENT_ACT_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_ACT_NEXT:
-			switch scan.Scan() {
-			case ',':
-				where = EVENT_ACT
-			case ';':
-				where = EVENT_NEXT
-			case '}':
-				onEventEnd()
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_COND:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onEventCond()
-				where = EVENT_COND_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_COND_NEXT:
-			switch scan.Scan() {
-			case ';':
-				onEventEnd()
-				where = STATE_NEXT
-			case '{':
-				where = EVENT_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_DST:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onEventDst()
-				where = EVENT_DST_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_DST_NEXT:
-			switch scan.Scan() {
-			case ';':
-				where = EVENT_NEXT
-			case '}':
-				onEventEnd()
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_NAME:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onEventName()
-				where = EVENT_NAME_NEXT
-			default:
-				errorUnexpected()
-			}
-		case EVENT_NAME_NEXT:
-			switch scan.Scan() {
-			case ';':
-				onEventEnd()
-				where = STATE_NEXT
-			case '{':
-				where = EVENT_NEXT
-			case scanner.Ident:
-				switch scan.TokenText() {
-				case "if":
-					where = EVENT_COND
-				default:
-					errorUnexpected()
-				}
-			default:
-				errorUnexpected()
-			}
-		case EVENT_NEXT:
-			switch scan.Scan() {
-			case ';':
-				where = EVENT_NEXT
-			case '}':
-				onEventEnd()
-				where = STATE_NEXT
-			case scanner.Ident:
-				switch scan.TokenText() {
-				case "act":
-					where = EVENT_ACT
-				case "dst":
-					where = EVENT_DST
-				default:
-					errorUnexpected()
-				}
-			default:
-				errorUnexpected()
-			}
-		case ROOT_BEGIN:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onRootBegin()
-				where = ROOT_NEXT
-			default:
-				errorUnexpected()
-			}
-		case ROOT_NAME:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onRootName()
-				where = ROOT_NEXT
-			default:
-				errorUnexpected()
-			}
-		case ROOT_NEXT:
-			switch scan.Scan() {
-			case '.':
-				where = ROOT_NAME
-			case '{':
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_ENTRY:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onStateEntry()
-				where = STATE_ENTRY_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_ENTRY_NEXT:
-			switch scan.Scan() {
-			case ',':
-				where = STATE_ENTRY
-			case ';':
-				where = STATE_NEXT
-			case '}':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_EXIT:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onStateExit()
-				where = STATE_EXIT_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_EXIT_NEXT:
-			switch scan.Scan() {
-			case ',':
-				where = STATE_EXIT
-			case ';':
-				where = STATE_NEXT
-			case '}':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_NAME:
-			switch scan.Scan() {
-			case ';':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			case '{':
-				where = STATE_NEXT
-			case scanner.Ident:
-				onStateName()
-				where = STATE_NAME_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_NAME_NEXT:
-			switch scan.Scan() {
-			case ';':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			case '{':
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_NEXT:
-			switch scan.Scan() {
-			case ';':
-				where = STATE_NEXT
-			case '}':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			case scanner.Ident:
-				switch scan.TokenText() {
-				case "entry":
-					where = STATE_ENTRY
-				case "event":
-					onEventBegin()
-					where = EVENT_NAME
-				case "exit":
-					where = STATE_EXIT
-				case "start":
-					where = STATE_START
-				case "state":
-					onStateBegin()
-					where = STATE_NAME
-				default:
-					errorUnexpected()
-				}
-			default:
-				errorUnexpected()
-			}
-		case STATE_START:
-			switch scan.Scan() {
-			case scanner.Ident:
-				onStateStart()
-				where = STATE_START_NEXT
-			default:
-				errorUnexpected()
-			}
-		case STATE_START_NEXT:
-			switch scan.Scan() {
-			case ';':
-				where = STATE_NEXT
-			case '}':
-				if onStateEnd() {
-					return state
-				}
-				where = STATE_NEXT
-			default:
-				errorUnexpected()
-			}
+	parser.OnErrorUnexpected = func() {
+		panic(scan.Pos().String() + ": unexpected " + scan.TokenText())
+	}
+	parser.OnEventAct = func() {
+		event.act = append(event.act, scan.TokenText())
+	}
+	parser.OnEventBegin = func() {
+		event = &Event{src: state}
+	}
+	parser.OnEventCond = func() {
+		event.cond = scan.TokenText()
+	}
+	parser.OnEventDst = func() {
+		var this = event
+		var text = scan.TokenText()
+		names[text] = append(names[text], func(st *State) {
+			this.dst = st
+		})
+	}
+	parser.OnEventEnd = func() {
+		if state.AddEvent(event) {
+			panic(scan.Pos().String() + ": event " + event.Name() + " redeclared")
 		}
 	}
-	return nil
+	parser.OnEventName = func() {
+		event.name = scan.TokenText()
+	}
+	parser.OnRootBegin = func() {
+		root = &State{name: scan.TokenText()}
+		state = root
+	}
+	parser.OnRootName = func() {
+		root.name += "." + scan.TokenText()
+	}
+	parser.OnStateBegin = func() {
+		if state == nil {
+			parser.OnErrorUnexpected()
+		}
+		state = &State{parent: state}
+	}
+	parser.OnStateEnd = func() {
+		if state == nil {
+			parser.OnErrorUnexpected()
+		}
+		if state.parent != nil {
+			state.parent.AddState(state)
+		}
+		state = state.parent
+	}
+	parser.OnStateEntry = func() {
+		state.entry = append(state.entry, scan.TokenText())
+	}
+	parser.OnStateExit = func() {
+		state.exit = append(state.exit, scan.TokenText())
+	}
+	parser.OnStateName = func() {
+		state.name = scan.TokenText()
+	}
+	parser.OnStateStart = func() {
+		var this = state
+		var text = scan.TokenText()
+		names[text] = append(names[text], func(st *State) {
+			this.start = st
+		})
+	}
+	parser.CondAct = func() bool {
+		return scan.TokenText() == "act"
+	}
+	parser.CondBra = func() bool {
+		return scan.TokenText() == "{"
+	}
+	parser.CondComma = func() bool {
+		return scan.TokenText() == ","
+	}
+	parser.CondDot = func() bool {
+		return scan.TokenText() == "."
+	}
+	parser.CondDst = func() bool {
+		return scan.TokenText() == "dst"
+	}
+	parser.CondEntry = func() bool {
+		return scan.TokenText() == "entry"
+	}
+	parser.CondEvent = func() bool {
+		return scan.TokenText() == "event"
+	}
+	parser.CondExit = func() bool {
+		return scan.TokenText() == "exit"
+	}
+	parser.CondIdent = func() bool {
+		return next == scanner.Ident
+	}
+	parser.CondIf = func() bool {
+		return scan.TokenText() == "if"
+	}
+	parser.CondKet = func() bool {
+		return scan.TokenText() == "}"
+	}
+	parser.CondSemi = func() bool {
+		return scan.TokenText() == ";"
+	}
+	parser.CondStart = func() bool {
+		return scan.TokenText() == "start"
+	}
+	parser.CondState = func() bool {
+		return scan.TokenText() == "state"
+	}
+	parser.Start()
+	scan.Init(file)
+	scan.Mode = scanner.ScanIdents | scanner.ScanComments | scanner.SkipComments
+	for next = scan.Scan(); next != scanner.EOF; next = scan.Scan() {
+		parser.SendNext()
+	}
+	if state != nil || root == nil {
+		panic(scan.Pos().String() + ": unexpected EOF")
+	}
+	for _, st := range root.AllDescendants(root) {
+		if list, ok := names[st.name]; ok {
+			for _, fn := range list {
+				fn(st)
+			}
+			names[st.name] = nil
+		}
+	}
+	for name, list := range names {
+		if len(list) != 0 {
+			panic("unknown state " + name)
+		}
+	}
+	return root
 }
+
+/******************************************************************************/
+
+type Parser struct {
+	SendNext          func()
+	Start             func()
+	OnErrorUnexpected func()
+	OnEventAct        func()
+	OnEventBegin      func()
+	OnEventCond       func()
+	OnEventDst        func()
+	OnEventEnd        func()
+	OnEventName       func()
+	OnRootBegin       func()
+	OnRootName        func()
+	OnStateBegin      func()
+	OnStateEnd        func()
+	OnStateEntry      func()
+	OnStateExit       func()
+	OnStateName       func()
+	OnStateStart      func()
+	CondAct           func() bool
+	CondBra           func() bool
+	CondComma         func() bool
+	CondDot           func() bool
+	CondDst           func() bool
+	CondEntry         func() bool
+	CondEvent         func() bool
+	CondExit          func() bool
+	CondIdent         func() bool
+	CondIf            func() bool
+	CondKet           func() bool
+	CondSemi          func() bool
+	CondStart         func() bool
+	CondState         func() bool
+}
+
+func NewParser() *Parser {
+	var (
+		fnRootBegin      []func()
+		fnRootNext       []func()
+		fnRootName       []func()
+		fnStateEntry     []func()
+		fnStateExit      []func()
+		fnStateStart     []func()
+		fnStateName      []func()
+		fnStateNameNext  []func()
+		fnStateStartNext []func()
+		fnStateEntryNext []func()
+		fnStateExitNext  []func()
+		fnStateNext      []func()
+		fnEventName      []func()
+		fnEventCond      []func()
+		fnEventAct       []func()
+		fnEventDst       []func()
+		fnEventNameNext  []func()
+		fnEventCondNext  []func()
+		fnEventDstNext   []func()
+		fnEventActNext   []func()
+		fnEventNext      []func()
+		current          []func()
+	)
+	var this = Parser{
+		SendNext: func() {
+			current[0]()
+		},
+		Start: func() {
+			if current == nil {
+				current = fnRootBegin
+			}
+		},
+	}
+	fnRootBegin = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnRootBegin()
+				current = fnRootNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnRootNext = []func(){
+		func() {
+			if this.CondBra() {
+				current = fnStateNext
+				return
+			}
+			if this.CondDot() {
+				current = fnRootName
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnRootName = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnRootName()
+				current = fnRootNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateEntry = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnStateEntry()
+				current = fnStateEntryNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateExit = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnStateExit()
+				current = fnStateExitNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateStart = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnStateStart()
+				current = fnStateStartNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateName = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnStateName()
+				current = fnStateNameNext
+				return
+			}
+			if this.CondSemi() {
+				current = nil
+				this.OnStateEnd()
+				current = fnStateNext
+				return
+			}
+			if this.CondBra() {
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateNameNext = []func(){
+		func() {
+			if this.CondSemi() {
+				current = nil
+				this.OnStateEnd()
+				current = fnStateNext
+				return
+			}
+			if this.CondBra() {
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateStartNext = []func(){
+		func() {
+			if this.CondSemi() {
+				current = fnStateNext
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnStateEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateEntryNext = []func(){
+		func() {
+			if this.CondComma() {
+				current = fnStateEntry
+				return
+			}
+			if this.CondSemi() {
+				current = fnStateNext
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnStateEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateExitNext = []func(){
+		func() {
+			if this.CondComma() {
+				current = fnStateExit
+				return
+			}
+			if this.CondSemi() {
+				current = fnStateNext
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnStateEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnStateNext = []func(){
+		func() {
+			if this.CondEntry() {
+				current = fnStateEntry
+				return
+			}
+			if this.CondEvent() {
+				current = nil
+				this.OnEventBegin()
+				current = fnEventName
+				return
+			}
+			if this.CondExit() {
+				current = fnStateExit
+				return
+			}
+			if this.CondStart() {
+				current = fnStateStart
+				return
+			}
+			if this.CondState() {
+				current = nil
+				this.OnStateBegin()
+				current = fnStateName
+				return
+			}
+			if this.CondSemi() {
+				return
+			}
+			if this.CondKet() {
+				this.OnStateEnd()
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventName = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnEventName()
+				current = fnEventNameNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventCond = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnEventCond()
+				current = fnEventCondNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventAct = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnEventAct()
+				current = fnEventActNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventDst = []func(){
+		func() {
+			if this.CondIdent() {
+				current = nil
+				this.OnEventDst()
+				current = fnEventDstNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventNameNext = []func(){
+		func() {
+			if this.CondIf() {
+				current = fnEventCond
+				return
+			}
+			if this.CondSemi() {
+				current = nil
+				this.OnEventEnd()
+				current = fnStateNext
+				return
+			}
+			if this.CondBra() {
+				current = fnEventNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventCondNext = []func(){
+		func() {
+			if this.CondSemi() {
+				current = nil
+				this.OnEventEnd()
+				current = fnStateNext
+				return
+			}
+			if this.CondBra() {
+				current = fnEventNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventDstNext = []func(){
+		func() {
+			if this.CondSemi() {
+				current = fnEventNext
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnEventEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventActNext = []func(){
+		func() {
+			if this.CondComma() {
+				current = fnEventAct
+				return
+			}
+			if this.CondSemi() {
+				current = fnEventNext
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnEventEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	fnEventNext = []func(){
+		func() {
+			if this.CondAct() {
+				current = fnEventAct
+				return
+			}
+			if this.CondDst() {
+				current = fnEventDst
+				return
+			}
+			if this.CondSemi() {
+				return
+			}
+			if this.CondKet() {
+				current = nil
+				this.OnEventEnd()
+				current = fnStateNext
+				return
+			}
+			this.OnErrorUnexpected()
+		},
+	}
+	return &this
+}
+
+/*
+main.Parser {
+	start root_begin;
+	state root_begin {
+		event next if ident { dst root_next; act root_begin; }
+	}
+	state root_next {
+		event next if bra { dst state_next; }
+		event next if dot { dst root_name; }
+	}
+	state root_name {
+		event next if ident { dst root_next; act root_name; }
+	}
+	state state_entry {
+		event next if ident { dst state_entry_next; act state_entry; }
+	}
+	state state_exit {
+		event next if ident { dst state_exit_next; act state_exit; }
+	}
+	state state_start {
+		event next if ident { dst state_start_next; act state_start; }
+	}
+	state {
+		state state_name {
+			event next if ident { dst state_name_next; act state_name; }
+		}
+		state state_name_next;
+		event next if semi { dst state_next; act state_end; }
+		event next if bra { dst state_next; }
+	}
+	state {
+		state state_start_next;
+		state state_entry_next {
+			event next if comma { dst state_entry; }
+		}
+		state state_exit_next {
+			event next if comma { dst state_exit; }
+		}
+		state state_next {
+			event next if entry { dst state_entry; }
+			event next if event { dst event_name; act event_begin; }
+			event next if exit { dst state_exit; }
+			event next if start { dst state_start; }
+			event next if state { dst state_name; act state_begin; }
+		}
+		event next if semi { dst state_next; }
+		event next if ket { dst state_next; act state_end; }
+	}
+	state event_name {
+		event next if ident { dst event_name_next; act event_name; }
+	}
+	state event_cond {
+		event next if ident { dst event_cond_next; act event_cond; }
+	}
+	state event_act {
+		event next if ident { dst event_act_next; act event_act; }
+	}
+	state event_dst {
+		event next if ident { dst event_dst_next; act event_dst; }
+	}
+	state {
+		state event_name_next {
+			event next if if { dst event_cond; }
+		}
+		state event_cond_next;
+		event next if semi { dst state_next; act event_end; }
+		event next if bra { dst event_next; }
+	}
+	state {
+		state event_dst_next;
+		state event_act_next {
+			event next if comma { dst event_act; }
+		}
+		state event_next {
+			event next if act { dst event_act; }
+			event next if dst { dst event_dst; }
+		}
+		event next if semi { dst event_next; }
+		event next if ket { dst state_next; act event_end; }
+	}
+	event next { act error_unexpected; }
+}
+*/
