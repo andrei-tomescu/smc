@@ -446,6 +446,52 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	line(2, "}")
 	line(2, "private readonly IHandler Handler;")
 	line(2, "private IState CurrentState;")
+	line(2, "#region Test")
+	line(2, "public static void Test(Action<bool> assert) {")
+	line(3, "var result = \"\";")
+	line(3, "var handler = new DelegateHandler() {")
+	for _, cond := range allcond {
+		line(4, "cond%s = () => false,", Camel(cond))
+	}
+	for _, act := range allact {
+		line(4, "on%s = () => result += \"<%s>\",", Camel(act), Camel(act))
+	}
+	line(3, "};")
+	line(3, "var test = new %s(handler);", name)
+	for _, state := range root.AllDescendants(root) {
+		if state.IsNested() {
+			continue
+		}
+		var groups = state.EventsGrouped()
+		for _, evname := range allev {
+			if events, found := groups[evname]; found {
+				for _, event := range events {
+					var actions, dst = MakeTransition(event)
+					var message = ""
+					for _, act := range actions {
+						message += "<" + Camel(act) + ">"
+					}
+					line(3, "test.CurrentState = State%s.Instance;", Camel(state.Name()))
+					if event.HasCond() {
+						line(3, "handler.cond%s = () => true;", Camel(event.Cond()))
+					}
+					line(3, "test.Send%s();", Camel(evname))
+					line(3, "assert(result == \"%s\");", message)
+					if dst != nil {
+						line(3, "assert(test.CurrentState == State%s.Instance);", Camel(dst.Name()))
+					} else {
+						line(3, "assert(test.CurrentState == State%s.Instance);", Camel(state.Name()))
+					}
+					if event.HasCond() {
+						line(3, "handler.cond%s = () => false;", Camel(event.Cond()))
+					}
+					line(3, "result = \"\";")
+				}
+			}
+		}
+	}
+	line(2, "}")
+	line(2, "#endregion Test")
 	line(1, "}")
 	line(0, "}")
 	line(0, "")
