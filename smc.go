@@ -353,6 +353,15 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 			line(idt, "parent.CurrentState = State%s.Instance;", Camel(dst.Name()))
 		}
 	}
+	var empty = func(events []*Event) bool {
+		for _, event := range events {
+			var actions, dst = MakeTransition(event)
+			if dst != nil || len(actions) != 0 {
+				return false
+			}
+		}
+		return true
+	}
 	var name, ns = SplitName(root.Name())
 	var allcond = AllConditions(root)
 	var allact = AllActions(root)
@@ -429,6 +438,9 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 		var groups = state.EventsGrouped()
 		for _, evname := range allev {
 			if events, found := groups[evname]; found {
+				if empty(events) {
+					continue
+				}
 				line(3, "public override void On%s(%s parent) {", Camel(evname), name)
 				for _, event := range events {
 					if event.HasCond() {
@@ -476,6 +488,15 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 		if dst != nil {
 			line(idt, "parent.CurrentState = State%s.Instance;", Camel(dst.Name()))
 		}
+	}
+	var empty = func(events []*Event) bool {
+		for _, event := range events {
+			var actions, dst = MakeTransition(event)
+			if dst != nil || len(actions) != 0 {
+				return false
+			}
+		}
+		return true
 	}
 	var name, ns = SplitName(root.Name())
 	var allcond = AllConditions(root)
@@ -574,6 +595,9 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 		var groups = state.EventsGrouped()
 		for _, evname := range allev {
 			if events, found := groups[evname]; found {
+				if empty(events) {
+					continue
+				}
 				line(3, "public override void On%s(%s parent)", Camel(evname), name)
 				line(3, "{")
 				for _, event := range events {
