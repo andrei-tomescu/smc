@@ -807,6 +807,7 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 /******************************************************************************/
 
 func CodeGenGo(file io.Writer, root *State, source []string) {
+	var events = make(map[string]map[string][]*Event)
 	var line = func(idt int, format string, args ...interface{}) {
 		fmt.Fprintf(file, strings.Repeat("\t", idt))
 		fmt.Fprintf(file, format, args...)
@@ -815,84 +816,82 @@ func CodeGenGo(file io.Writer, root *State, source []string) {
 	var transition = func(idt int, event *Event) {
 		var actions, dst = MakeTransition(event)
 		if dst != nil && len(actions) != 0 {
-			line(idt, "current = nil")
+			line(idt, "this.currentState = \"none\"")
 		}
 		for _, act := range actions {
 			line(idt, "this.On%s()", Camel(act))
 		}
 		if dst != nil {
-			line(idt, "current = fn%s", Camel(dst.Name()))
+			line(idt, "this.currentState = \"%s\"", Camel(dst.Name()))
 		}
+	}
+	var empty = func(events []*Event) bool {
+		for _, event := range events {
+			var actions, dst = MakeTransition(event)
+			if dst != nil || len(actions) != 0 {
+				return false
+			}
+		}
+		return true
 	}
 	var name, ns = SplitName(root.Name())
 	var allcond = AllConditions(root)
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
-	line(0, "package %s", strings.Join(ns, "_"))
+	for _, state := range root.AllDescendants(root) {
+		if state.IsLeaf() {
+			events[state.Name()] = state.EventsGrouped()
+		}
+	}
+	line(0, "package %s", strings.Join(ns, ""))
 	line(0, "")
 	line(0, "type %s struct {", name)
-	for _, ev := range allev {
-		line(1, "Send%s func()", Camel(ev))
-	}
-	line(1, "Start func()")
 	for _, act := range allact {
 		line(1, "On%s func()", Camel(act))
 	}
 	for _, cond := range allcond {
 		line(1, "Cond%s func() bool", Camel(cond))
 	}
+	line(1, "currentState string")
 	line(0, "}")
 	line(0, "")
-	line(0, "func New%s() *%s {", name, name)
-	line(1, "var (")
-	for _, state := range root.AllDescendants(root) {
-		if state.IsLeaf() {
-			line(2, "fn%s []func()", Camel(state.Name()))
-		}
-	}
-	line(2, "current []func()")
-	line(1, ")")
-	line(1, "var this = %s{", name)
-	for idx, ev := range allev {
-		line(2, "Send%s: func() {", Camel(ev))
-		line(3, "current[%d]()", idx)
-		line(2, "},")
-	}
-	line(2, "Start: func() {")
-	line(3, "if current == nil {")
-	var actions, dst = MakeStart(root)
-	for _, act := range actions {
-		line(4, "this.On%s()", Camel(act))
-	}
-	line(4, "current = fn%s", Camel(dst.Name()))
-	line(3, "}")
-	line(2, "},")
-	line(1, "}")
-	for _, state := range root.AllDescendants(root) {
-		if state.IsNested() {
-			continue
-		}
-		line(1, "fn%s = []func() {", Camel(state.Name()))
-		var groups = state.EventsGrouped()
-		for _, evname := range allev {
-			line(2, "func() {")
-			if events, found := groups[evname]; found {
-				for _, event := range events {
+	for _, evname := range allev {
+		line(0, "func (this *%s) Send%s() {", name, Camel(evname))
+		line(1, "switch this.currentState {")
+		for _, state := range root.AllDescendants(root) {
+			if state.IsNested() {
+				continue
+			}
+			if evs, found := events[state.Name()][evname]; found {
+				if empty(evs) {
+					continue
+				}
+				line(1, "case \"%s\":", Camel(state.Name()))
+				for _, event := range evs {
 					if event.HasCond() {
-						line(3, "if this.Cond%s() {", Camel(event.Cond()))
-						transition(4, event)
-						line(4, "return")
-						line(3, "}")
-					} else {
+						line(2, "if this.Cond%s() {", Camel(event.Cond()))
 						transition(3, event)
+						line(3, "return;")
+						line(2, "}")
+					} else {
+						transition(2, event)
 					}
 				}
 			}
-			line(2, "},")
 		}
+		line(1, "case \"none\":")
+		line(2, "panic(\"invalid state\")")
 		line(1, "}")
+		line(0, "}")
 	}
-	line(1, "return &this")
+	var actions, dst = MakeStart(root)
+	line(0, "func (this *%s) Start() {", name)
+	line(1, "if this.currentState == \"\" {")
+	for _, act := range actions {
+		line(2, "this.On%s();", Camel(act))
+	}
+	line(2, "this.currentState = \"%s\"", Camel(dst.Name()))
+	line(1, "}")
 	line(0, "}")
 	line(0, "")
 	line(0, "/*")
@@ -988,117 +987,119 @@ func Scan(file io.Reader) *State {
 		root   *State
 		state  *State
 		event  *Event
+		parser *Parser
 		scan   scanner.Scanner
 		next   rune
 		names  = make(map[string][]func(*State))
-		parser = NewParser()
 	)
-	parser.OnErrorUnexpected = func() {
-		panic(scan.Pos().String() + ": unexpected " + scan.TokenText())
-	}
-	parser.OnEventAct = func() {
-		event.act = append(event.act, scan.TokenText())
-	}
-	parser.OnEventBegin = func() {
-		event = &Event{src: state}
-	}
-	parser.OnEventCond = func() {
-		event.cond = scan.TokenText()
-	}
-	parser.OnEventDst = func() {
-		var this = event
-		var text = scan.TokenText()
-		names[text] = append(names[text], func(st *State) {
-			this.dst = st
-		})
-	}
-	parser.OnEventEnd = func() {
-		if state.AddEvent(event) {
-			panic(scan.Pos().String() + ": event " + event.Name() + " redeclared")
-		}
-	}
-	parser.OnEventName = func() {
-		event.name = scan.TokenText()
-	}
-	parser.OnRootBegin = func() {
-		root = &State{name: scan.TokenText()}
-		state = root
-	}
-	parser.OnRootName = func() {
-		root.name += "." + scan.TokenText()
-	}
-	parser.OnStateBegin = func() {
-		if state == nil {
-			parser.OnErrorUnexpected()
-		}
-		state = &State{parent: state}
-	}
-	parser.OnStateEnd = func() {
-		if state == nil {
-			parser.OnErrorUnexpected()
-		}
-		if state.parent != nil {
-			state.parent.AddState(state)
-		}
-		state = state.parent
-	}
-	parser.OnStateEntry = func() {
-		state.entry = append(state.entry, scan.TokenText())
-	}
-	parser.OnStateExit = func() {
-		state.exit = append(state.exit, scan.TokenText())
-	}
-	parser.OnStateName = func() {
-		state.name = scan.TokenText()
-	}
-	parser.OnStateStart = func() {
-		var this = state
-		var text = scan.TokenText()
-		names[text] = append(names[text], func(st *State) {
-			this.start = st
-		})
-	}
-	parser.CondAct = func() bool {
-		return scan.TokenText() == "act"
-	}
-	parser.CondBra = func() bool {
-		return scan.TokenText() == "{"
-	}
-	parser.CondComma = func() bool {
-		return scan.TokenText() == ","
-	}
-	parser.CondDot = func() bool {
-		return scan.TokenText() == "."
-	}
-	parser.CondDst = func() bool {
-		return scan.TokenText() == "dst"
-	}
-	parser.CondEntry = func() bool {
-		return scan.TokenText() == "entry"
-	}
-	parser.CondEvent = func() bool {
-		return scan.TokenText() == "event"
-	}
-	parser.CondExit = func() bool {
-		return scan.TokenText() == "exit"
-	}
-	parser.CondIdent = func() bool {
-		return next == scanner.Ident
-	}
-	parser.CondIf = func() bool {
-		return scan.TokenText() == "if"
-	}
-	parser.CondKet = func() bool {
-		return scan.TokenText() == "}"
-	}
-	parser.CondSemi = func() bool {
-		return scan.TokenText() == ";"
-	}
-	parser.CondStart = func() bool {
-		return scan.TokenText() == "start"
-	}
-	parser.CondState = func() bool {
-		return scan.TokenText() == "state"
+	parser = &Parser{
+		OnErrorUnexpected: func() {
+			panic(scan.Pos().String() + ": unexpected " + scan.TokenText())
+		},
+		OnEventAct: func() {
+			event.act = append(event.act, scan.TokenText())
+		},
+		OnEventBegin: func() {
+			event = &Event{src: state}
+		},
+		OnEventCond: func() {
+			event.cond = scan.TokenText()
+		},
+		OnEventDst: func() {
+			var this = event
+			var text = scan.TokenText()
+			names[text] = append(names[text], func(st *State) {
+				this.dst = st
+			})
+		},
+		OnEventEnd: func() {
+			if state.AddEvent(event) {
+				panic(scan.Pos().String() + ": event " + event.Name() + " redeclared")
+			}
+		},
+		OnEventName: func() {
+			event.name = scan.TokenText()
+		},
+		OnRootBegin: func() {
+			root = &State{name: scan.TokenText()}
+			state = root
+		},
+		OnRootName: func() {
+			root.name += "." + scan.TokenText()
+		},
+		OnStateBegin: func() {
+			if state == nil {
+				parser.OnErrorUnexpected()
+			}
+			state = &State{parent: state}
+		},
+		OnStateEnd: func() {
+			if state == nil {
+				parser.OnErrorUnexpected()
+			}
+			if state.parent != nil {
+				state.parent.AddState(state)
+			}
+			state = state.parent
+		},
+		OnStateEntry: func() {
+			state.entry = append(state.entry, scan.TokenText())
+		},
+		OnStateExit: func() {
+			state.exit = append(state.exit, scan.TokenText())
+		},
+		OnStateName: func() {
+			state.name = scan.TokenText()
+		},
+		OnStateStart: func() {
+			var this = state
+			var text = scan.TokenText()
+			names[text] = append(names[text], func(st *State) {
+				this.start = st
+			})
+		},
+		CondAct: func() bool {
+			return scan.TokenText() == "act"
+		},
+		CondBra: func() bool {
+			return scan.TokenText() == "{"
+		},
+		CondComma: func() bool {
+			return scan.TokenText() == ","
+		},
+		CondDot: func() bool {
+			return scan.TokenText() == "."
+		},
+		CondDst: func() bool {
+			return scan.TokenText() == "dst"
+		},
+		CondEntry: func() bool {
+			return scan.TokenText() == "entry"
+		},
+		CondEvent: func() bool {
+			return scan.TokenText() == "event"
+		},
+		CondExit: func() bool {
+			return scan.TokenText() == "exit"
+		},
+		CondIdent: func() bool {
+			return next == scanner.Ident
+		},
+		CondIf: func() bool {
+			return scan.TokenText() == "if"
+		},
+		CondKet: func() bool {
+			return scan.TokenText() == "}"
+		},
+		CondSemi: func() bool {
+			return scan.TokenText() == ";"
+		},
+		CondStart: func() bool {
+			return scan.TokenText() == "start"
+		},
+		CondState: func() bool {
+			return scan.TokenText() == "state"
+		},
 	}
 	parser.Start()
 	scan.Init(file)
@@ -1128,8 +1129,6 @@ func Scan(file io.Reader) *State {
 /******************************************************************************/
 
 type Parser struct {
-	SendNext          func()
-	Start             func()
 	OnErrorUnexpected func()
 	OnEventAct        func()
 	OnEventBegin      func()
@@ -1159,453 +1158,365 @@ type Parser struct {
 	CondSemi          func() bool
 	CondStart         func() bool
 	CondState         func() bool
+	currentState      string
 }
 
-func NewParser() *Parser {
-	var (
-		fnRootBegin      []func()
-		fnRootNext       []func()
-		fnRootName       []func()
-		fnStateEntry     []func()
-		fnStateExit      []func()
-		fnStateStart     []func()
-		fnStateName      []func()
-		fnStateNameNext  []func()
-		fnStateStartNext []func()
-		fnStateEntryNext []func()
-		fnStateExitNext  []func()
-		fnStateNext      []func()
-		fnEventName      []func()
-		fnEventCond      []func()
-		fnEventAct       []func()
-		fnEventDst       []func()
-		fnEventNameNext  []func()
-		fnEventCondNext  []func()
-		fnEventDstNext   []func()
-		fnEventActNext   []func()
-		fnEventNext      []func()
-		current          []func()
-	)
-	var this = Parser{
-		SendNext: func() {
-			current[0]()
-		},
-		Start: func() {
-			if current == nil {
-				current = fnRootBegin
-			}
-		},
+func (this *Parser) SendNext() {
+	switch this.currentState {
+	case "RootBegin":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnRootBegin()
+			this.currentState = "RootNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "RootNext":
+		if this.CondBra() {
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondDot() {
+			this.currentState = "RootName"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "RootName":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnRootName()
+			this.currentState = "RootNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateEntry":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnStateEntry()
+			this.currentState = "StateEntryNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateExit":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnStateExit()
+			this.currentState = "StateExitNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateStart":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnStateStart()
+			this.currentState = "StateStartNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateName":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnStateName()
+			this.currentState = "StateNameNext"
+			return
+		}
+		if this.CondSemi() {
+			this.currentState = "none"
+			this.OnStateEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondBra() {
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateNameNext":
+		if this.CondSemi() {
+			this.currentState = "none"
+			this.OnStateEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondBra() {
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateStartNext":
+		if this.CondSemi() {
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnStateEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateEntryNext":
+		if this.CondComma() {
+			this.currentState = "StateEntry"
+			return
+		}
+		if this.CondSemi() {
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnStateEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateExitNext":
+		if this.CondComma() {
+			this.currentState = "StateExit"
+			return
+		}
+		if this.CondSemi() {
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnStateEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "StateNext":
+		if this.CondEntry() {
+			this.currentState = "StateEntry"
+			return
+		}
+		if this.CondEvent() {
+			this.currentState = "none"
+			this.OnEventBegin()
+			this.currentState = "EventName"
+			return
+		}
+		if this.CondExit() {
+			this.currentState = "StateExit"
+			return
+		}
+		if this.CondStart() {
+			this.currentState = "StateStart"
+			return
+		}
+		if this.CondState() {
+			this.currentState = "none"
+			this.OnStateBegin()
+			this.currentState = "StateName"
+			return
+		}
+		if this.CondSemi() {
+			return
+		}
+		if this.CondKet() {
+			this.OnStateEnd()
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventName":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnEventName()
+			this.currentState = "EventNameNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventCond":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnEventCond()
+			this.currentState = "EventCondNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventAct":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnEventAct()
+			this.currentState = "EventActNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventDst":
+		if this.CondIdent() {
+			this.currentState = "none"
+			this.OnEventDst()
+			this.currentState = "EventDstNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventNameNext":
+		if this.CondIf() {
+			this.currentState = "EventCond"
+			return
+		}
+		if this.CondSemi() {
+			this.currentState = "none"
+			this.OnEventEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondBra() {
+			this.currentState = "EventNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventCondNext":
+		if this.CondSemi() {
+			this.currentState = "none"
+			this.OnEventEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		if this.CondBra() {
+			this.currentState = "EventNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventDstNext":
+		if this.CondSemi() {
+			this.currentState = "EventNext"
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnEventEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventActNext":
+		if this.CondComma() {
+			this.currentState = "EventAct"
+			return
+		}
+		if this.CondSemi() {
+			this.currentState = "EventNext"
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnEventEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "EventNext":
+		if this.CondAct() {
+			this.currentState = "EventAct"
+			return
+		}
+		if this.CondDst() {
+			this.currentState = "EventDst"
+			return
+		}
+		if this.CondSemi() {
+			return
+		}
+		if this.CondKet() {
+			this.currentState = "none"
+			this.OnEventEnd()
+			this.currentState = "StateNext"
+			return
+		}
+		this.OnErrorUnexpected()
+	case "none":
+		panic("invalid state")
 	}
-	fnRootBegin = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnRootBegin()
-				current = fnRootNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
+}
+func (this *Parser) Start() {
+	if this.currentState == "" {
+		this.currentState = "RootBegin"
 	}
-	fnRootNext = []func(){
-		func() {
-			if this.CondBra() {
-				current = fnStateNext
-				return
-			}
-			if this.CondDot() {
-				current = fnRootName
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnRootName = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnRootName()
-				current = fnRootNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateEntry = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnStateEntry()
-				current = fnStateEntryNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateExit = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnStateExit()
-				current = fnStateExitNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateStart = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnStateStart()
-				current = fnStateStartNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateName = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnStateName()
-				current = fnStateNameNext
-				return
-			}
-			if this.CondSemi() {
-				current = nil
-				this.OnStateEnd()
-				current = fnStateNext
-				return
-			}
-			if this.CondBra() {
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateNameNext = []func(){
-		func() {
-			if this.CondSemi() {
-				current = nil
-				this.OnStateEnd()
-				current = fnStateNext
-				return
-			}
-			if this.CondBra() {
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateStartNext = []func(){
-		func() {
-			if this.CondSemi() {
-				current = fnStateNext
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnStateEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateEntryNext = []func(){
-		func() {
-			if this.CondComma() {
-				current = fnStateEntry
-				return
-			}
-			if this.CondSemi() {
-				current = fnStateNext
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnStateEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateExitNext = []func(){
-		func() {
-			if this.CondComma() {
-				current = fnStateExit
-				return
-			}
-			if this.CondSemi() {
-				current = fnStateNext
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnStateEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnStateNext = []func(){
-		func() {
-			if this.CondEntry() {
-				current = fnStateEntry
-				return
-			}
-			if this.CondEvent() {
-				current = nil
-				this.OnEventBegin()
-				current = fnEventName
-				return
-			}
-			if this.CondExit() {
-				current = fnStateExit
-				return
-			}
-			if this.CondStart() {
-				current = fnStateStart
-				return
-			}
-			if this.CondState() {
-				current = nil
-				this.OnStateBegin()
-				current = fnStateName
-				return
-			}
-			if this.CondSemi() {
-				return
-			}
-			if this.CondKet() {
-				this.OnStateEnd()
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventName = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnEventName()
-				current = fnEventNameNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventCond = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnEventCond()
-				current = fnEventCondNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventAct = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnEventAct()
-				current = fnEventActNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventDst = []func(){
-		func() {
-			if this.CondIdent() {
-				current = nil
-				this.OnEventDst()
-				current = fnEventDstNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventNameNext = []func(){
-		func() {
-			if this.CondIf() {
-				current = fnEventCond
-				return
-			}
-			if this.CondSemi() {
-				current = nil
-				this.OnEventEnd()
-				current = fnStateNext
-				return
-			}
-			if this.CondBra() {
-				current = fnEventNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventCondNext = []func(){
-		func() {
-			if this.CondSemi() {
-				current = nil
-				this.OnEventEnd()
-				current = fnStateNext
-				return
-			}
-			if this.CondBra() {
-				current = fnEventNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventDstNext = []func(){
-		func() {
-			if this.CondSemi() {
-				current = fnEventNext
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnEventEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventActNext = []func(){
-		func() {
-			if this.CondComma() {
-				current = fnEventAct
-				return
-			}
-			if this.CondSemi() {
-				current = fnEventNext
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnEventEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	fnEventNext = []func(){
-		func() {
-			if this.CondAct() {
-				current = fnEventAct
-				return
-			}
-			if this.CondDst() {
-				current = fnEventDst
-				return
-			}
-			if this.CondSemi() {
-				return
-			}
-			if this.CondKet() {
-				current = nil
-				this.OnEventEnd()
-				current = fnStateNext
-				return
-			}
-			this.OnErrorUnexpected()
-		},
-	}
-	return &this
 }
 
 /*
 main.Parser {
-	start root_begin;
-	state root_begin {
-		event next if ident { dst root_next; act root_begin; }
+	start RootBegin;
+	state RootBegin {
+		event Next if Ident { dst RootNext; act RootBegin; }
 	}
-	state root_next {
-		event next if bra { dst state_next; }
-		event next if dot { dst root_name; }
+	state RootNext {
+		event Next if Bra { dst StateNext; }
+		event Next if Dot { dst RootName; }
 	}
-	state root_name {
-		event next if ident { dst root_next; act root_name; }
+	state RootName {
+		event Next if Ident { dst RootNext; act RootName; }
 	}
-	state state_entry {
-		event next if ident { dst state_entry_next; act state_entry; }
+	state StateEntry {
+		event Next if Ident { dst StateEntryNext; act StateEntry; }
 	}
-	state state_exit {
-		event next if ident { dst state_exit_next; act state_exit; }
+	state StateExit {
+		event Next if Ident { dst StateExitNext; act StateExit; }
 	}
-	state state_start {
-		event next if ident { dst state_start_next; act state_start; }
-	}
-	state {
-		state state_name {
-			event next if ident { dst state_name_next; act state_name; }
-		}
-		state state_name_next;
-		event next if semi { dst state_next; act state_end; }
-		event next if bra { dst state_next; }
+	state StateStart {
+		event Next if Ident { dst StateStartNext; act StateStart; }
 	}
 	state {
-		state state_start_next;
-		state state_entry_next {
-			event next if comma { dst state_entry; }
+		state StateName {
+			event Next if Ident { dst StateNameNext; act StateName; }
 		}
-		state state_exit_next {
-			event next if comma { dst state_exit; }
-		}
-		state state_next {
-			event next if entry { dst state_entry; }
-			event next if event { dst event_name; act event_begin; }
-			event next if exit { dst state_exit; }
-			event next if start { dst state_start; }
-			event next if state { dst state_name; act state_begin; }
-		}
-		event next if semi { dst state_next; }
-		event next if ket { dst state_next; act state_end; }
-	}
-	state event_name {
-		event next if ident { dst event_name_next; act event_name; }
-	}
-	state event_cond {
-		event next if ident { dst event_cond_next; act event_cond; }
-	}
-	state event_act {
-		event next if ident { dst event_act_next; act event_act; }
-	}
-	state event_dst {
-		event next if ident { dst event_dst_next; act event_dst; }
+		state StateNameNext;
+		event Next if Semi { dst StateNext; act StateEnd; }
+		event Next if Bra { dst StateNext; }
 	}
 	state {
-		state event_name_next {
-			event next if if { dst event_cond; }
+		state StateStartNext;
+		state StateEntryNext {
+			event Next if Comma { dst StateEntry; }
 		}
-		state event_cond_next;
-		event next if semi { dst state_next; act event_end; }
-		event next if bra { dst event_next; }
+		state StateExitNext {
+			event Next if Comma { dst StateExit; }
+		}
+		state StateNext {
+			event Next if Entry { dst StateEntry; }
+			event Next if Event { dst EventName; act EventBegin; }
+			event Next if Exit { dst StateExit; }
+			event Next if Start { dst StateStart; }
+			event Next if State { dst StateName; act StateBegin; }
+		}
+		event Next if Semi { dst StateNext; }
+		event Next if Ket { dst StateNext; act StateEnd; }
+	}
+	state EventName {
+		event Next if Ident { dst EventNameNext; act EventName; }
+	}
+	state EventCond {
+		event Next if Ident { dst EventCondNext; act EventCond; }
+	}
+	state EventAct {
+		event Next if Ident { dst EventActNext; act EventAct; }
+	}
+	state EventDst {
+		event Next if Ident { dst EventDstNext; act EventDst; }
 	}
 	state {
-		state event_dst_next;
-		state event_act_next {
-			event next if comma { dst event_act; }
+		state EventNameNext {
+			event Next if If { dst EventCond; }
 		}
-		state event_next {
-			event next if act { dst event_act; }
-			event next if dst { dst event_dst; }
-		}
-		event next if semi { dst event_next; }
-		event next if ket { dst state_next; act event_end; }
+		state EventCondNext;
+		event Next if Semi { dst StateNext; act EventEnd; }
+		event Next if Bra { dst EventNext; }
 	}
-	event next { act error_unexpected; }
+	state {
+		state EventDstNext;
+		state EventActNext {
+			event Next if Comma { dst EventAct; }
+		}
+		state EventNext {
+			event Next if Act { dst EventAct; }
+			event Next if Dst { dst EventDst; }
+		}
+		event Next if Semi { dst EventNext; }
+		event Next if Ket { dst StateNext; act EventEnd; }
+	}
+	event Next { act ErrorUnexpected; }
 }
 */
