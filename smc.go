@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"sort"
 	"strings"
@@ -282,12 +281,12 @@ func StringSet(list []string) []string {
 /******************************************************************************/
 
 func CheckWriteFile(filename string, text []byte) {
-	if data, err := ioutil.ReadFile(filename); err == nil {
+	if data, err := os.ReadFile(filename); err == nil {
 		if bytes.Equal(text, data) {
 			return
 		}
 	}
-	if err := ioutil.WriteFile(filename, text, 0666); err != nil {
+	if err := os.WriteFile(filename, text, 0666); err != nil {
 		panic("unable to create file " + filename)
 	}
 }
@@ -304,11 +303,26 @@ func main() {
 	if len(os.Args) != 4 {
 		panic("usage: smc [cs|cpp|go] <input-file> <output-file>")
 	}
-	var file, err = os.Open(os.Args[2])
-	if err != nil {
-		panic(err)
+	var (
+		root *State
+	)
+	if os.Args[2] == "standalone" {
+		if data, err := os.ReadFile(os.Args[3]); err == nil {
+			var text = string(data)
+			var first = strings.Index(text, "/**smc") + 6
+			var last = strings.Index(text, "smc**/")
+			root = Scan(strings.NewReader(text[first:last]))
+		} else {
+			panic(err)
+		}
+	} else {
+		if file, err := os.Open(os.Args[2]); err == nil {
+			root = Scan(file)
+			file.Close()
+		} else {
+			panic(err)
+		}
 	}
-	var root = Scan(file)
 	var src = PrintRoot(root, "")
 	root.PushEvents()
 	if os.Args[1] == "cs" {
@@ -466,9 +480,9 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	line(1, "}")
 	line(0, "}")
 	line(0, "")
-	line(0, "/*")
+	line(0, "/**smc")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "*/")
+	line(0, "smc**/")
 }
 
 func CodeGenCsLms(file io.Writer, root *State, source []string) {
@@ -675,9 +689,9 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 	line(1, "}")
 	line(0, "}")
 	line(0, "")
-	line(0, "/*")
+	line(0, "/**smc")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "*/")
+	line(0, "smc**/")
 }
 
 /******************************************************************************/
@@ -799,9 +813,9 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	line(1, "};")
 	line(0, "}")
 	line(0, "")
-	line(0, "/*")
+	line(0, "/**smc")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "*/")
+	line(0, "smc**/")
 }
 
 /******************************************************************************/
@@ -894,9 +908,9 @@ func CodeGenGo(file io.Writer, root *State, source []string) {
 	line(1, "}")
 	line(0, "}")
 	line(0, "")
-	line(0, "/*")
+	line(0, "/**smc")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "*/")
+	line(0, "smc**/")
 }
 
 /******************************************************************************/
