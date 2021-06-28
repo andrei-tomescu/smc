@@ -300,51 +300,36 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	if len(os.Args) != 4 {
-		panic("usage: smc [cs|cpp|go] <input-file> <output-file>")
+	if len(os.Args) < 3 {
+		panic("usage: smc [cs|cpp|go] <file>")
 	}
 	var (
 		root *State
 	)
-	if os.Args[2] == "standalone" {
-		if data, err := os.ReadFile(os.Args[3]); err == nil {
-			var text = string(data)
-			var first = strings.Index(text, "/**smc") + 6
-			var last = strings.Index(text, "smc**/")
-			root = Scan(strings.NewReader(text[first:last]))
-		} else {
-			panic(err)
-		}
+	if data, err := os.ReadFile(os.Args[2]); err == nil {
+		var text = string(data)
+		var first = strings.Index(text, "/**smc") + 6
+		var last = strings.Index(text, "smc**/")
+		root = Scan(strings.NewReader(text[first:last]))
 	} else {
-		if file, err := os.Open(os.Args[2]); err == nil {
-			root = Scan(file)
-			file.Close()
-		} else {
-			panic(err)
-		}
+		panic(err)
 	}
 	var src = PrintRoot(root, "")
+	var buf = bytes.NewBuffer(nil)
 	root.PushEvents()
 	if os.Args[1] == "cs" {
-		var buffer = bytes.NewBuffer(nil)
-		CodeGenCs(buffer, root, src)
-		CheckWriteFile(os.Args[3], buffer.Bytes())
+		CodeGenCs(buf, root, src)
 	}
 	if os.Args[1] == "cpp" {
-		var buffer = bytes.NewBuffer(nil)
-		CodeGenCpp(buffer, root, src)
-		CheckWriteFile(os.Args[3], buffer.Bytes())
+		CodeGenCpp(buf, root, src)
 	}
 	if os.Args[1] == "go" {
-		var buffer = bytes.NewBuffer(nil)
-		CodeGenGo(buffer, root, src)
-		CheckWriteFile(os.Args[3], buffer.Bytes())
+		CodeGenGo(buf, root, src)
 	}
 	if os.Args[1] == "lms-cs" {
-		var buffer = bytes.NewBuffer(nil)
-		CodeGenCsLms(buffer, root, src)
-		CheckWriteFile(os.Args[3], buffer.Bytes())
+		CodeGenCsLms(buf, root, src)
 	}
+	CheckWriteFile(os.Args[2], buf.Bytes())
 }
 
 /******************************************************************************/
@@ -381,6 +366,10 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
 	line(0, "using System;")
+	line(0, "")
+	line(0, "/**smc")
+	line(0, strings.Join(source, "\r\n"))
+	line(0, "smc**/")
 	line(0, "")
 	line(0, "namespace %s {", strings.Join(ns, "."))
 	line(1, "public sealed class %s {", name)
@@ -479,10 +468,6 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	line(2, "private IState CurrentState;")
 	line(1, "}")
 	line(0, "}")
-	line(0, "")
-	line(0, "/**smc")
-	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
 }
 
 func CodeGenCsLms(file io.Writer, root *State, source []string) {
@@ -517,6 +502,10 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
 	line(0, "using System;")
+	line(0, "")
+	line(0, "/**smc")
+	line(0, strings.Join(source, "\r\n"))
+	line(0, "smc**/")
 	line(0, "")
 	line(0, "namespace %s", strings.Join(ns, "."))
 	line(0, "{")
@@ -688,10 +677,6 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 	line(2, "}")
 	line(1, "}")
 	line(0, "}")
-	line(0, "")
-	line(0, "/**smc")
-	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
 }
 
 /******************************************************************************/
@@ -719,6 +704,10 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	var allact = AllActions(root)
 	var allev = AllEvents(root)
 	line(0, "#pragma once")
+	line(0, "")
+	line(0, "/**smc")
+	line(0, strings.Join(source, "\r\n"))
+	line(0, "smc**/")
 	line(0, "")
 	line(0, "namespace %s {", strings.Join(ns, "::"))
 	line(1, "struct %s {", name)
@@ -812,10 +801,6 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	line(2, "IState *CurrentState = nullptr;")
 	line(1, "};")
 	line(0, "}")
-	line(0, "")
-	line(0, "/**smc")
-	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
 }
 
 /******************************************************************************/
@@ -858,6 +843,10 @@ func CodeGenGo(file io.Writer, root *State, source []string) {
 		}
 	}
 	line(0, "package %s", strings.Join(ns, ""))
+	line(0, "")
+	line(0, "/**smc")
+	line(0, strings.Join(source, "\r\n"))
+	line(0, "smc**/")
 	line(0, "")
 	line(0, "type %s struct {", name)
 	for _, act := range allact {
@@ -907,10 +896,6 @@ func CodeGenGo(file io.Writer, root *State, source []string) {
 	line(2, "this.currentState = \"%s\"", Camel(dst.Name()))
 	line(1, "}")
 	line(0, "}")
-	line(0, "")
-	line(0, "/**smc")
-	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
 }
 
 /******************************************************************************/
