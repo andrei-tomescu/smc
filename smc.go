@@ -308,8 +308,8 @@ func main() {
 	)
 	if data, err := os.ReadFile(os.Args[2]); err == nil {
 		var text = string(data)
-		var first = strings.Index(text, "/**smc") + 6
-		var last = strings.Index(text, "smc**/")
+		var first = strings.Index(text, "/**") + 3
+		var last = strings.Index(text, "**/")
 		root = Scan(strings.NewReader(text[first:last]))
 	} else {
 		panic(err)
@@ -367,9 +367,9 @@ func CodeGenCs(file io.Writer, root *State, source []string) {
 	var allev = AllEvents(root)
 	line(0, "using System;")
 	line(0, "")
-	line(0, "/**smc")
+	line(0, "/**")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
+	line(0, "**/")
 	line(0, "")
 	line(0, "namespace %s {", strings.Join(ns, "."))
 	line(1, "public sealed class %s {", name)
@@ -503,9 +503,9 @@ func CodeGenCsLms(file io.Writer, root *State, source []string) {
 	var allev = AllEvents(root)
 	line(0, "using System;")
 	line(0, "")
-	line(0, "/**smc")
+	line(0, "/**")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
+	line(0, "**/")
 	line(0, "")
 	line(0, "namespace %s", strings.Join(ns, "."))
 	line(0, "{")
@@ -705,9 +705,9 @@ func CodeGenCpp(file io.Writer, root *State, source []string) {
 	var allev = AllEvents(root)
 	line(0, "#pragma once")
 	line(0, "")
-	line(0, "/**smc")
+	line(0, "/**")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
+	line(0, "**/")
 	line(0, "")
 	line(0, "namespace %s {", strings.Join(ns, "::"))
 	line(1, "struct %s {", name)
@@ -844,9 +844,9 @@ func CodeGenGo(file io.Writer, root *State, source []string) {
 	}
 	line(0, "package %s", strings.Join(ns, ""))
 	line(0, "")
-	line(0, "/**smc")
+	line(0, "/**")
 	line(0, strings.Join(source, "\r\n"))
-	line(0, "smc**/")
+	line(0, "**/")
 	line(0, "")
 	line(0, "type %s struct {", name)
 	for _, act := range allact {
