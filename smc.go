@@ -1139,6 +1139,90 @@ func Scan(file io.Reader) *State {
 
 /******************************************************************************/
 
+/**
+main.Parser {
+	start RootBegin;
+	state RootBegin {
+		event Next if Ident { dst RootNext; act RootBegin; }
+	}
+	state RootNext {
+		event Next if Bra { dst StateNext; }
+		event Next if Dot { dst RootName; }
+	}
+	state RootName {
+		event Next if Ident { dst RootNext; act RootName; }
+	}
+	state StateEntry {
+		event Next if Ident { dst StateEntryNext; act StateEntry; }
+	}
+	state StateExit {
+		event Next if Ident { dst StateExitNext; act StateExit; }
+	}
+	state StateStart {
+		event Next if Ident { dst StateStartNext; act StateStart; }
+	}
+	state {
+		state StateName {
+			event Next if Ident { dst StateNameNext; act StateName; }
+		}
+		state StateNameNext;
+		event Next if Semi { dst StateNext; act StateEnd; }
+		event Next if Bra { dst StateNext; }
+	}
+	state {
+		state StateStartNext;
+		state StateEntryNext {
+			event Next if Comma { dst StateEntry; }
+		}
+		state StateExitNext {
+			event Next if Comma { dst StateExit; }
+		}
+		state StateNext {
+			event Next if Entry { dst StateEntry; }
+			event Next if Event { dst EventName; act EventBegin; }
+			event Next if Exit { dst StateExit; }
+			event Next if Start { dst StateStart; }
+			event Next if State { dst StateName; act StateBegin; }
+		}
+		event Next if Semi { dst StateNext; }
+		event Next if Ket { dst StateNext; act StateEnd; }
+	}
+	state EventName {
+		event Next if Ident { dst EventNameNext; act EventName; }
+	}
+	state EventCond {
+		event Next if Ident { dst EventCondNext; act EventCond; }
+	}
+	state EventAct {
+		event Next if Ident { dst EventActNext; act EventAct; }
+	}
+	state EventDst {
+		event Next if Ident { dst EventDstNext; act EventDst; }
+	}
+	state {
+		state EventNameNext {
+			event Next if If { dst EventCond; }
+		}
+		state EventCondNext;
+		event Next if Semi { dst StateNext; act EventEnd; }
+		event Next if Bra { dst EventNext; }
+	}
+	state {
+		state EventDstNext;
+		state EventActNext {
+			event Next if Comma { dst EventAct; }
+		}
+		state EventNext {
+			event Next if Act { dst EventAct; }
+			event Next if Dst { dst EventDst; }
+		}
+		event Next if Semi { dst EventNext; }
+		event Next if Ket { dst StateNext; act EventEnd; }
+	}
+	event Next { act ErrorUnexpected; }
+}
+**/
+
 type Parser struct {
 	OnErrorUnexpected func()
 	OnEventAct        func()
@@ -1447,87 +1531,3 @@ func (this *Parser) Start() {
 		this.currentState = "RootBegin"
 	}
 }
-
-/*
-main.Parser {
-	start RootBegin;
-	state RootBegin {
-		event Next if Ident { dst RootNext; act RootBegin; }
-	}
-	state RootNext {
-		event Next if Bra { dst StateNext; }
-		event Next if Dot { dst RootName; }
-	}
-	state RootName {
-		event Next if Ident { dst RootNext; act RootName; }
-	}
-	state StateEntry {
-		event Next if Ident { dst StateEntryNext; act StateEntry; }
-	}
-	state StateExit {
-		event Next if Ident { dst StateExitNext; act StateExit; }
-	}
-	state StateStart {
-		event Next if Ident { dst StateStartNext; act StateStart; }
-	}
-	state {
-		state StateName {
-			event Next if Ident { dst StateNameNext; act StateName; }
-		}
-		state StateNameNext;
-		event Next if Semi { dst StateNext; act StateEnd; }
-		event Next if Bra { dst StateNext; }
-	}
-	state {
-		state StateStartNext;
-		state StateEntryNext {
-			event Next if Comma { dst StateEntry; }
-		}
-		state StateExitNext {
-			event Next if Comma { dst StateExit; }
-		}
-		state StateNext {
-			event Next if Entry { dst StateEntry; }
-			event Next if Event { dst EventName; act EventBegin; }
-			event Next if Exit { dst StateExit; }
-			event Next if Start { dst StateStart; }
-			event Next if State { dst StateName; act StateBegin; }
-		}
-		event Next if Semi { dst StateNext; }
-		event Next if Ket { dst StateNext; act StateEnd; }
-	}
-	state EventName {
-		event Next if Ident { dst EventNameNext; act EventName; }
-	}
-	state EventCond {
-		event Next if Ident { dst EventCondNext; act EventCond; }
-	}
-	state EventAct {
-		event Next if Ident { dst EventActNext; act EventAct; }
-	}
-	state EventDst {
-		event Next if Ident { dst EventDstNext; act EventDst; }
-	}
-	state {
-		state EventNameNext {
-			event Next if If { dst EventCond; }
-		}
-		state EventCondNext;
-		event Next if Semi { dst StateNext; act EventEnd; }
-		event Next if Bra { dst EventNext; }
-	}
-	state {
-		state EventDstNext;
-		state EventActNext {
-			event Next if Comma { dst EventAct; }
-		}
-		state EventNext {
-			event Next if Act { dst EventAct; }
-			event Next if Dst { dst EventDst; }
-		}
-		event Next if Semi { dst EventNext; }
-		event Next if Ket { dst StateNext; act EventEnd; }
-	}
-	event Next { act ErrorUnexpected; }
-}
-*/
