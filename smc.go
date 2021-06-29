@@ -291,6 +291,23 @@ func CheckWriteFile(filename string, text []byte) {
 	}
 }
 
+func ReadRoot(filename string) string {
+	if data, err := os.ReadFile(filename); err == nil {
+		var text = string(data)
+		if first := strings.Index(text, "/**") + 3; first != 2 {
+			if last := strings.Index(text, "**/"); last != -1 {
+				return text[first:last]
+			} else {
+				panic(filename + ": expecting /** ... **/")
+			}
+		} else {
+			panic(filename + ": expecting /** ... **/")
+		}
+	} else {
+		panic(err)
+	}
+}
+
 /******************************************************************************/
 
 func main() {
@@ -304,32 +321,27 @@ func main() {
 		panic("usage: smc [cs|cpp|go] <file>")
 	}
 	var (
-		root *State
+		root = Scan(strings.NewReader(ReadRoot(os.Args[2])))
+		src  = PrintRoot(root, "")
+		buf  = bytes.NewBuffer(nil)
 	)
-	if data, err := os.ReadFile(os.Args[2]); err == nil {
-		var text = string(data)
-		var first = strings.Index(text, "/**") + 3
-		var last = strings.Index(text, "**/")
-		root = Scan(strings.NewReader(text[first:last]))
-	} else {
-		panic(err)
-	}
-	var src = PrintRoot(root, "")
-	var buf = bytes.NewBuffer(nil)
 	root.PushEvents()
 	if os.Args[1] == "cs" {
 		CodeGenCs(buf, root, src)
+		CheckWriteFile(os.Args[2], buf.Bytes())
 	}
 	if os.Args[1] == "cpp" {
 		CodeGenCpp(buf, root, src)
+		CheckWriteFile(os.Args[2], buf.Bytes())
 	}
 	if os.Args[1] == "go" {
 		CodeGenGo(buf, root, src)
+		CheckWriteFile(os.Args[2], buf.Bytes())
 	}
 	if os.Args[1] == "lms-cs" {
 		CodeGenCsLms(buf, root, src)
+		CheckWriteFile(os.Args[2], buf.Bytes())
 	}
-	CheckWriteFile(os.Args[2], buf.Bytes())
 }
 
 /******************************************************************************/
