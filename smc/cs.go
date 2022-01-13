@@ -245,7 +245,7 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	line(2, "{")
 	line(3, "if (CurrentState == null)")
 	line(3, "{")
-	line(4, "Handler.Log(\"start\");")
+	line(4, "Handler.Log(\"start *\");")
 	var actions, dst = MakeStart(root)
 	for _, act := range actions {
 		line(4, "Handler.Log(\"action %s\");", Camel(act))
@@ -262,7 +262,7 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	for _, ev := range allev {
 		line(3, "public virtual void On%s(%s parent)", Camel(ev), name)
 		line(3, "{")
-		line(4, "parent.Handler.Log(\"event ignored %s\");", Camel(ev))
+		line(4, "parent.Handler.Log(\"ignored %s\");", Camel(ev))
 		line(3, "}")
 	}
 	line(2, "}")
@@ -297,18 +297,18 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 					if event.HasCond() {
 						line(4, "if (parent.Handler.Cond%s())", Camel(event.Cond()))
 						line(4, "{")
-						line(5, "parent.Handler.Log(\"current state %s\");", Camel(state.Name()))
+						line(5, "parent.Handler.Log(\"current state %s *\");", Camel(state.Name()))
 						line(5, "parent.Handler.Log(\"event %s\");", Camel(evname))
 						line(5, "parent.Handler.Log(\"condition %s\");", Camel(event.Cond()))
 						transition(5, event)
-						line(5, "parent.Handler.Log(\"done %s\");", Camel(evname))
+						line(5, "parent.Handler.Log(\"done\");")
 						line(5, "return;")
 						line(4, "}")
 					} else {
-						line(4, "parent.Handler.Log(\"current state %s\");", Camel(state.Name()))
+						line(4, "parent.Handler.Log(\"current state %s *\");", Camel(state.Name()))
 						line(4, "parent.Handler.Log(\"event %s\");", Camel(evname))
 						transition(4, event)
-						line(4, "parent.Handler.Log(\"done %s\");", Camel(evname))
+						line(4, "parent.Handler.Log(\"done\");")
 					}
 				}
 				line(3, "}")
