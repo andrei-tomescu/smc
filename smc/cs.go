@@ -151,12 +151,15 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	var transition = func(idt int, event *Event) {
 		var actions, dst = MakeTransition(event)
 		if dst != nil && len(actions) != 0 {
+			line(idt, "parent.Handler.Log(\"invalid state\");")
 			line(idt, "parent.CurrentState = InvalidState.Instance;")
 		}
 		for _, act := range actions {
+			line(idt, "parent.Handler.Log(\"action %s\");", Camel(act))
 			line(idt, "parent.Handler.On%s();", Camel(act))
 		}
 		if dst != nil {
+			line(idt, "parent.Handler.Log(\"state %s\");", Camel(dst.Name()))
 			line(idt, "parent.CurrentState = State%s.Instance;", Camel(dst.Name()))
 		}
 	}
@@ -192,6 +195,7 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 		line(3, "void On%s();", Camel(act))
 	}
 	line(3, "void PostEvent(Action action);")
+	line(3, "void Log(string message);")
 	line(2, "}")
 	line(2, "")
 	line(2, "public sealed class DelegateHandler: IHandler")
@@ -215,17 +219,24 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	line(4, "postEvent(action);")
 	line(3, "}")
 	line(3, "public Action<Action> postEvent { get; set; }")
+	line(3, "public void Log(string message)")
+	line(3, "{")
+	line(4, "logger?.Invoke(message);")
+	line(3, "}")
+	line(3, "public Action<string> logger { get; set; }")
 	line(2, "}")
 	line(2, "")
 	for _, ev := range allev {
 		line(2, "public void Send%s()", Camel(ev))
 		line(2, "{")
+		line(3, "Handler.Log(\"send %s\");", Camel(ev))
 		line(3, "CurrentState.On%s(this);", Camel(ev))
 		line(2, "}")
 	}
 	for _, ev := range allev {
 		line(2, "public void Post%s()", Camel(ev))
 		line(2, "{")
+		line(3, "Handler.Log(\"post %s\");", Camel(ev))
 		line(3, "Handler.PostEvent(Send%s);", Camel(ev))
 		line(2, "}")
 	}
@@ -234,19 +245,25 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	line(2, "{")
 	line(3, "if (CurrentState == null)")
 	line(3, "{")
+	line(4, "Handler.Log(\"start\");")
 	var actions, dst = MakeStart(root)
 	for _, act := range actions {
+		line(4, "Handler.Log(\"action %s\");", Camel(act))
 		line(4, "Handler.On%s();", Camel(act))
 	}
+	line(4, "Handler.Log(\"state %s\");", Camel(dst.Name()))
 	line(4, "CurrentState = State%s.Instance;", Camel(dst.Name()))
 	line(3, "}")
 	line(2, "}")
 	line(2, "")
+
 	line(2, "private class IState")
 	line(2, "{")
 	for _, ev := range allev {
 		line(3, "public virtual void On%s(%s parent)", Camel(ev), name)
-		line(3, "{ }")
+		line(3, "{")
+		line(4, "parent.Handler.Log(\"event ignored %s\");", Camel(ev))
+		line(3, "}")
 	}
 	line(2, "}")
 	line(2, "")
@@ -255,7 +272,8 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	for _, ev := range allev {
 		line(3, "public override void On%s(%s parent)", Camel(ev), name)
 		line(3, "{")
-		line(4, "throw new Exception();")
+		line(4, "parent.Handler.Log(\"invalid event %s\");", Camel(ev))
+		line(4, "throw new InvalidOperationException();")
 		line(3, "}")
 	}
 	line(3, "public static readonly IState Instance = new InvalidState();")
@@ -279,11 +297,18 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 					if event.HasCond() {
 						line(4, "if (parent.Handler.Cond%s())", Camel(event.Cond()))
 						line(4, "{")
+						line(5, "parent.Handler.Log(\"current state %s\");", Camel(state.Name()))
+						line(5, "parent.Handler.Log(\"event %s\");", Camel(evname))
+						line(5, "parent.Handler.Log(\"condition %s\");", Camel(event.Cond()))
 						transition(5, event)
+						line(5, "parent.Handler.Log(\"done %s\");", Camel(evname))
 						line(5, "return;")
 						line(4, "}")
 					} else {
+						line(4, "parent.Handler.Log(\"current state %s\");", Camel(state.Name()))
+						line(4, "parent.Handler.Log(\"event %s\");", Camel(evname))
 						transition(4, event)
+						line(4, "parent.Handler.Log(\"done %s\");", Camel(evname))
 					}
 				}
 				line(3, "}")
