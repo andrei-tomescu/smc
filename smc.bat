@@ -1,7 +1,4 @@
-smc.exe go smc/parser.go
-cd smc
-go fmt
-cd ..
-go fmt
-go build smc.go
+go fmt github.com/andrei-tomescu/smc/main
+go fmt github.com/andrei-tomescu/smc
+go build -o smc.exe github.com/andrei-tomescu/smc/main
 pause
