@@ -178,6 +178,8 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	var allev = root.AllEvents()
 	line(0, "using System;")
 	line(0, "")
+	line(0, "// https://stswiki.net.plm.eds.com/display/SAN/State+machine+compiler")
+	line(0, "")
 	line(0, "/**")
 	line(0, strings.Join(source, "\r\n"))
 	line(0, "**/")
