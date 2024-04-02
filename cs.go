@@ -184,6 +184,39 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	line(0, strings.Join(source, "\r\n"))
 	line(0, "**/")
 	line(0, "")
+	line(0, "/*")
+	var actions, dst = MakeStart(root)
+	line(0, "start %s %s", dst.Name(), actions)
+	for _, state := range root.AllDescendants(root) {
+		if state.IsNested() {
+			continue
+		}
+		line(0, "%s", state.Name())
+		var groups = state.EventsGrouped()
+		for _, evname := range allev {
+			if events, found := groups[evname]; found {
+				if empty(events) {
+					continue
+				}
+				for _, event := range events {
+					var actions, dst = MakeTransition(event)
+					var (
+						condstr = ""
+						dststr  = ""
+					)
+					if event.HasCond() {
+						condstr = fmt.Sprintf(" if %s", event.Cond())
+					}
+					if dst != nil {
+						dststr = fmt.Sprintf(" dst %s", dst.Name())
+					}
+					line(1, "%s%s%s %s", evname, condstr, dststr, actions)
+				}
+			}
+		}
+	}
+	line(0, "*/")
+	line(0, "")
 	line(0, "namespace %s", strings.Join(ns, "."))
 	line(0, "{")
 	line(1, "public sealed class %s", name)
@@ -248,7 +281,7 @@ func PrintLmsCs(file io.Writer, root *State, source []string) {
 	line(3, "if (CurrentState == null)")
 	line(3, "{")
 	line(4, "Handler.Log(\"start *\");")
-	var actions, dst = MakeStart(root)
+	actions, dst = MakeStart(root)
 	for _, act := range actions {
 		line(4, "Handler.Log(\"action %s\");", Camel(act))
 		line(4, "Handler.On%s();", Camel(act))
